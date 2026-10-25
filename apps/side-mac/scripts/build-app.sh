@@ -13,8 +13,16 @@ resources="$app_dir/Contents/Resources"
 rm -rf "$app_dir"
 mkdir -p "$app_dir/Contents/MacOS" "$resources/lib" "$resources/web" "$resources/models" "$resources/metadata"
 cp "$bin_dir/Side" "$app_dir/Contents/MacOS/Side"
-resource_bundle="$bin_dir/SideCaptureKit_SideCaptureKit.bundle"
-if [ ! -s "$resource_bundle/Contents/Resources/hard-blocked-bundle-ids.json" ]; then
+resource_bundle=
+for candidate in "$bin_dir"/*.bundle; do
+  [ -s "$candidate/Contents/Resources/hard-blocked-bundle-ids.json" ] || continue
+  if [ -n "$resource_bundle" ]; then
+    printf '%s\n' 'Multiple hard-blocked bundle ID resources' >&2
+    exit 1
+  fi
+  resource_bundle=$candidate
+done
+if [ -z "$resource_bundle" ]; then
   printf '%s\n' 'Missing hard-blocked bundle ID resource' >&2
   exit 1
 fi
