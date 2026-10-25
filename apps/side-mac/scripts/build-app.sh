@@ -23,7 +23,14 @@ for candidate in "$bin_dir"/*.bundle; do
   resource_bundle=$candidate
 done
 if [ -z "$resource_bundle" ]; then
-  printf '%s\n' 'Missing hard-blocked bundle ID resource' >&2
+  printf 'Missing hard-blocked bundle ID resource in %s\n' "$bin_dir" >&2
+  ls -la "$bin_dir" >&2
+  for candidate in "$bin_dir"/*.bundle; do
+    [ -d "$candidate" ] || continue
+    printf 'Resource bundle: %s\n' "$candidate" >&2
+    ls -la "$candidate" >&2
+    if [ -d "$candidate/Contents" ]; then ls -la "$candidate/Contents" >&2; fi
+  done
   exit 1
 fi
 cp -R "$resource_bundle" "$resources/"
