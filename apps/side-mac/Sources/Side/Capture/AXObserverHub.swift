@@ -44,6 +44,7 @@ final class CaptureStream {
     private var paused = true
     private(set) var activeBundleID: String?
     private var activeAppName: String?
+    private(set) var generation = 0
     var isSecureInputEnabled: Bool { secureInputEnabled() }
 
     init(
@@ -64,6 +65,12 @@ final class CaptureStream {
         deniedBundleIDs = deniedBundleIds
         self.captureTypedText = captureTypedText
         self.paused = paused
+    }
+
+    func invalidateSession() {
+        generation += 1
+        activeBundleID = nil
+        activeAppName = nil
     }
 
     @discardableResult
@@ -149,6 +156,10 @@ final class AXObserverHub {
     private let now: () -> Date
     private var lastInputAt: Date?
     private var idleFlushTimer: Timer?
+    private var retryTask: Task<Void, Never>?
+    private var retryAttempt = 0
+    private var activePID: pid_t?
+    private var activeAppName: String?
     private(set) var registrationAttempts = 0
     var observerRegistrationFailures: Int {
         failedRegistrations.count + (observerCreationFailed ? 1 : 0)
@@ -183,30 +194,71 @@ final class AXObserverHub {
     func activate(bundleID: String, appName: String, pid: pid_t) {
         stop()
         self.bundleID = bundleID
-        guard stream.activate(bundleID: bundleID, appName: appName) else { return }
+        activePID = pid
+        activeAppName = appName
+        retryAttempt = 0
+        registerObserver(reason: "activation")
+    }
+
+    private func registerObserver(reason: String) {
+        retryTask?.cancel()
+        retryTask = nil
+        if let observer {
+            for (element, name) in registrations {
+                AXObserverRemoveNotification(observer, element, name)
+            }
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(observer), .commonModes)
+        }
+        registrations.removeAll()
+        failedRegistrations.removeAll()
+        observer = nil
+        application = nil
+        focusedWindow = nil
+        focusedElement = nil
+        guard let bundleID, let activePID, let activeAppName else { return }
+        guard stream.activate(bundleID: bundleID, appName: activeAppName) else { return }
         guard isTrusted() else {
-            stream.emit(.windowChanged, bundleID: bundleID, reason: "activation")
+            stream.emit(.windowChanged, bundleID: bundleID, reason: reason)
             return
         }
 
         registrationAttempts += 1
-        guard let newObserver = createObserver(pid, Self.callback) else {
+        guard let newObserver = createObserver(activePID, Self.callback) else {
             observerCreationFailed = true
-            stream.emit(.windowChanged, bundleID: bundleID, reason: "activation")
+            stream.emit(.windowChanged, bundleID: bundleID, reason: reason)
+            scheduleRetry()
             return
         }
         observerCreationFailed = false
         observer = newObserver
-        let app = AXUIElementCreateApplication(pid)
+        let app = AXUIElementCreateApplication(activePID)
         application = app
         addNotification(kAXFocusedWindowChangedNotification as CFString, to: app)
         addNotification(kAXFocusedUIElementChangedNotification as CFString, to: app)
         CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(newObserver), .commonModes)
-        refreshFocusedWindow(reason: "activation")
+        refreshFocusedWindow(reason: reason)
         refreshFocusedElement()
+        if observerRegistrationFailures == 0 { retryAttempt = 0 }
+        else { scheduleRetry() }
+    }
+
+    private func scheduleRetry() {
+        guard retryTask == nil, bundleID != nil else { return }
+        retryAttempt += 1
+        let delay = min(pow(2.0, Double(retryAttempt - 1)), 30.0)
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            await MainActor.run { self.registerObserver(reason: "retry") }
+        }
     }
 
     func stop() {
+        retryTask?.cancel()
+        retryTask = nil
+        retryAttempt = 0
+        activePID = nil
+        activeAppName = nil
         idleFlushTimer?.invalidate()
         idleFlushTimer = nil
         flushTypedText()
@@ -378,7 +430,7 @@ final class AXObserverHub {
         if let old = focusedWindow {
             failedRegistrations.removeAll { $0.0 == old && $0.1 == kAXTitleChangedNotification as CFString }
         }
-        focusedWindow = Self.attribute(application, kAXFocusedWindowAttribute as CFString) as! AXUIElement?
+        focusedWindow = Self.axElement(Self.attribute(application, kAXFocusedWindowAttribute as CFString))
         if let focusedWindow {
             addNotification(kAXTitleChangedNotification as CFString, to: focusedWindow)
         }
@@ -400,7 +452,7 @@ final class AXObserverHub {
                     $0.1 == kAXSelectedTextChangedNotification as CFString)
             }
         }
-        focusedElement = Self.attribute(application, kAXFocusedUIElementAttribute as CFString) as! AXUIElement?
+        focusedElement = Self.axElement(Self.attribute(application, kAXFocusedUIElementAttribute as CFString))
         previousValue = nil
         pendingText = ""
         fieldLabel = nil
@@ -434,6 +486,11 @@ final class AXObserverHub {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name, &value) == .success else { return nil }
         return value
+    }
+
+    static func axElement(_ value: Any?) -> AXUIElement? {
+        guard let value, CFGetTypeID(value as CFTypeRef) == AXUIElementGetTypeID() else { return nil }
+        return unsafeDowncast(value as AnyObject, to: AXUIElement.self)
     }
 
     private static func prefixUTF8(_ text: String, maxBytes: Int) -> String {

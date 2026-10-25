@@ -4,13 +4,14 @@ set -eu
 package_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 repo_dir=$(CDPATH= cd -- "$package_dir/../.." && pwd)
 
+(cd "$repo_dir" && bun run scripts/gates/sync-version.ts)
 swift build --package-path "$package_dir" -c release
 bin_dir=$(swift build --package-path "$package_dir" -c release --show-bin-path)
 
 app_dir="$package_dir/.build/release/Side.app"
 resources="$app_dir/Contents/Resources"
 rm -rf "$app_dir"
-mkdir -p "$app_dir/Contents/MacOS" "$resources/lib" "$resources/web" "$resources/models"
+mkdir -p "$app_dir/Contents/MacOS" "$resources/lib" "$resources/web" "$resources/models" "$resources/metadata"
 cp "$bin_dir/Side" "$app_dir/Contents/MacOS/Side"
 resource_bundle="$bin_dir/SideCaptureKit_SideCaptureKit.bundle"
 if [ ! -s "$resource_bundle/Contents/Resources/hard-blocked-bundle-ids.json" ]; then
@@ -36,8 +37,10 @@ if [ ! -f "$sqlite_library" ]; then
   printf '%s\n' 'Missing build-time SQLite dylib with FTS5 and extension loading' >&2
   exit 1
 fi
+(cd "$repo_dir" && bun run scripts/gates/verify-sqlite.ts "$sqlite_library")
 cp -L "$sqlite_library" "$resources/lib/libsqlite3.dylib"
 install_name_tool -id @rpath/libsqlite3.dylib "$resources/lib/libsqlite3.dylib"
+codesign --force --sign - "$resources/lib/libsqlite3.dylib"
 vec_library=$(cd "$repo_dir" && bun -e 'import { getLoadablePath } from "sqlite-vec"; console.log(getLoadablePath())')
 cp "$vec_library" "$resources/lib/vec0.dylib"
 native_arch=$(bun -e 'console.log(process.arch)')
@@ -61,11 +64,13 @@ for asset in "$model_dir/config.json" "$model_dir/tokenizer_config.json" "$model
     exit 1
   fi
 done
+(cd "$repo_dir" && bun run scripts/gates/verify-model.ts "$resources/models")
+(cd "$repo_dir" && SIDE_SQLITE_SOURCE="$sqlite_library" bun run scripts/gates/release-metadata.ts "$app_dir")
 
-codesign --force --sign - "$resources/lib/libsqlite3.dylib"
 codesign --force --sign - "$resources/lib/vec0.dylib"
 codesign --force --sign - "$resources/lib/libonnxruntime.1.dylib"
 codesign --force --sign - "$resources/side"
+(cd "$repo_dir" && bun run scripts/gates/build-manifest.ts "$app_dir")
 codesign --force --sign - "$app_dir"
 codesign --verify --deep --strict "$app_dir"
 "$resources/side" help >/dev/null

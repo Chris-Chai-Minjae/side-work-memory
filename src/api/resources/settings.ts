@@ -44,6 +44,7 @@ function toResource(settings: Settings) {
     capture_typed_text: capture.captureTypedText,
     screen_ocr: capture.screenOcr,
     aside_adapter: capture.asideAdapter,
+    browser_history_enabled: capture.browserHistoryEnabled,
     retention_days: capture.retentionDays,
     rules: capture.rules,
     summary_model: capture.summaryModel ?? null,

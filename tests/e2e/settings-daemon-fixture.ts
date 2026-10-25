@@ -166,18 +166,26 @@ export async function startSettingsFixture(webDirectory: string, inputMonitoring
       callDaemon: (method: string, params?: unknown) => daemonRpc(socketPath, method, params),
       async close() {
         input.end()
-        await running
-        lines.close()
-        output.destroy()
-        rmSync(directory, { recursive: true, force: true })
+        try {
+          await running
+        } finally {
+          lines.close()
+          output.destroy()
+          input.destroy()
+          rmSync(directory, { recursive: true, force: true })
+        }
       },
     }
   } catch (error) {
     input.end()
-    await running?.catch(() => {})
-    lines.close()
-    output.destroy()
-    rmSync(directory, { recursive: true, force: true })
+    try {
+      await running?.catch(() => {})
+    } finally {
+      lines.close()
+      output.destroy()
+      input.destroy()
+      rmSync(directory, { recursive: true, force: true })
+    }
     throw error
   }
 }

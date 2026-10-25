@@ -204,3 +204,19 @@ test("Given clear all, the injected key rotation runs after deletion", async () 
     expect(db.query("SELECT id FROM context_awareness_summaries").all()).toEqual([])
   })
 })
+
+test("Given a reader holding the ledger WAL, clear reports the checkpoint failure after deletion", async () => {
+  await withHistory(async ({ db, directory, handlers }) => {
+    addSummary(db, { at: new Date(2026, 8, 24, 9).getTime() })
+    const reader = openLedger(join(directory, "ledger.db"))
+    try {
+      reader.exec("BEGIN")
+      reader.query("SELECT COUNT(*) FROM context_awareness_summaries").get()
+
+      await expect(handlers.clear({ target: "all" })).rejects.toThrow("WAL checkpoint")
+      expect(db.query("SELECT id FROM context_awareness_summaries").all()).toEqual([])
+    } finally {
+      reader.close()
+    }
+  })
+})

@@ -12,6 +12,7 @@ import {
   SYNC_DEBOUNCE_MS,
 } from "../constants"
 import { type FenceResult, withFence } from "../ledger/fence"
+import { truncateWal } from "../sqlite/checkpoint"
 import { type ContextAwarenessChunk, chunkContextAwarenessDayPage } from "./chunk"
 import { EMBEDDING_MODEL_ID } from "./embed"
 import { putIndexedChunk } from "./index-db"
@@ -170,7 +171,7 @@ export async function syncMemoryIndex(options: SyncOptions): Promise<FenceResult
     }
     try {
       await options.beforeCommit?.()
-      return commit(() => {
+      const committed = commit(() => {
         indexDb
           .transaction(() => {
             const remove = indexDb.query("DELETE FROM chunks WHERE path = ?")
@@ -198,6 +199,10 @@ export async function syncMemoryIndex(options: SyncOptions): Promise<FenceResult
           .immediate()
         return result
       })
+      if (committed.status === "committed" && (deleted.length > 0 || changed.length > 0)) {
+        truncateWal(indexDb)
+      }
+      return committed
     } finally {
       if (temporary) await rm(temporary, { force: true })
     }

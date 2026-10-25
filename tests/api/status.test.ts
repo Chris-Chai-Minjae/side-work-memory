@@ -141,6 +141,7 @@ test("P4-R1-T1: status has the exact capture_status shape and evaluates the URL 
       health,
       today: TODAY,
       url_denied: true,
+      diagnostics: { last_error: null, last_successful_capture_at: null },
     },
   })
   expect(await rpc(f.handlers, "status", { url: "https://notexample.com" })).toMatchObject({

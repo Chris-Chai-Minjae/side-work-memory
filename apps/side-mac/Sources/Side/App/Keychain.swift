@@ -48,14 +48,23 @@ struct SideKeychain: SideKeyStore {
 
     func rotateMasterKey() throws -> Data {
         let replacement = try randomKey()
-        let status = SecItemDelete(itemQuery(service: Self.masterService, account: account) as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw SideKeychainError.keychain(status)
-        }
-        let addStatus = SecItemAdd(
-            addQuery(service: Self.masterService, account: account, data: replacement) as CFDictionary,
-            nil
-        )
+        let query = itemQuery(service: Self.masterService, account: account)
+        return try Self.replaceMasterKey(replacement, update: {
+            SecItemUpdate(query as CFDictionary, [kSecValueData as String: replacement] as CFDictionary)
+        }, add: {
+            SecItemAdd(addQuery(service: Self.masterService, account: account, data: replacement) as CFDictionary, nil)
+        })
+    }
+
+    static func replaceMasterKey(
+        _ replacement: Data,
+        update: () -> OSStatus,
+        add: () -> OSStatus
+    ) throws -> Data {
+        let updateStatus = update()
+        if updateStatus == errSecSuccess { return replacement }
+        guard updateStatus == errSecItemNotFound else { throw SideKeychainError.keychain(updateStatus) }
+        let addStatus = add()
         guard addStatus == errSecSuccess else { throw SideKeychainError.keychain(addStatus) }
         return replacement
     }
@@ -131,8 +140,6 @@ struct SideKeychain: SideKeyStore {
         var query = itemQuery(service: service, account: account)
         query[(returnAttributes ? kSecReturnAttributes : kSecReturnData) as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        // The legacy file-based Keychain shim also needs this flag to avoid SecurityAgent.
-        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
         let context = LAContext()
         context.interactionNotAllowed = true
         query[kSecUseAuthenticationContext as String] = context

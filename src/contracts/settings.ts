@@ -1,6 +1,7 @@
 import { z } from "zod"
 
 const bundleIdOrDomain = z.string().regex(/^[A-Za-z0-9.-]+$/)
+const hostname = bundleIdOrDomain.transform((value) => value.toLowerCase().replace(/\.$/u, ""))
 
 export const RuleSchema = z.discriminatedUnion("scope", [
   z.strictObject({
@@ -11,7 +12,7 @@ export const RuleSchema = z.discriminatedUnion("scope", [
   z.strictObject({
     scope: z.literal("url"),
     behavior: z.enum(["observe", "do_not_observe"]),
-    urlDomain: bundleIdOrDomain,
+    urlDomain: hostname,
   }),
 ])
 
@@ -90,6 +91,7 @@ export const SettingsSchema = z.strictObject({
     screenOcr: z.boolean().default(true),
     summaryModel: ModelRefSchema.optional(),
     asideAdapter: z.boolean().default(false),
+    browserHistoryEnabled: z.boolean().default(false),
   }),
   defaultModel: ModelRefSchema.optional(),
   providers: ProvidersSchema.default([]),
@@ -106,6 +108,7 @@ export const SettingsPatchSchema = z.strictObject({
   screenOcr: z.boolean().optional(),
   summaryModel: ModelRefSchema.nullable().optional(),
   asideAdapter: z.boolean().optional(),
+  browserHistoryEnabled: z.boolean().optional(),
   defaultModel: ModelRefSchema.nullable().optional(),
   providers: ProvidersSchema.optional(),
   summary: SummarySchema.optional(),

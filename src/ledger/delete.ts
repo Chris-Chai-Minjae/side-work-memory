@@ -130,7 +130,7 @@ export async function clearLedger(
             .all()
         : db
             .query<SummaryRow, [number, number]>(
-              "SELECT window_from, window_to FROM context_awareness_summaries WHERE window_from <= ? AND window_to >= ?",
+              "SELECT window_from, window_to FROM context_awareness_summaries WHERE window_from < ? AND window_to > ?",
             )
             .all(now, start)
     const dirty = new Set(events.map((row) => localDay(row.occurred_at)))
@@ -190,7 +190,7 @@ export async function clearLedger(
     if (start === null) db.query("DELETE FROM context_awareness_summaries").run()
     else
       db.query(
-        "DELETE FROM context_awareness_summaries WHERE window_from <= ? AND window_to >= ?",
+        "DELETE FROM context_awareness_summaries WHERE window_from < ? AND window_to > ?",
       ).run(now, start)
 
     if (start === null) {

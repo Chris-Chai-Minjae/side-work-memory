@@ -29,6 +29,7 @@ export function openIndexDb(path: string): Database {
     db.exec(`
       PRAGMA journal_mode=WAL;
       PRAGMA foreign_keys=ON;
+      PRAGMA secure_delete=ON;
       CREATE TABLE IF NOT EXISTS chunks (
         id TEXT PRIMARY KEY, path TEXT NOT NULL, day TEXT NOT NULL,
         window_from INTEGER, window_to INTEGER, heading TEXT NOT NULL,

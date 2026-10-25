@@ -5,16 +5,19 @@ final class WorkspaceObserver: NSObject {
     private let stream: CaptureStream
     private let axObserver: AXObserverHub
     private let onActivation: (String) -> Void
+    private let invalidateCapture: () -> Void
     private var running = false
     private var sessionActive = false
 
     init(
         stream: CaptureStream, axObserver: AXObserverHub,
-        onActivation: @escaping (String) -> Void = { _ in }
+        onActivation: @escaping (String) -> Void = { _ in },
+        invalidateCapture: @escaping () -> Void = {}
     ) {
         self.stream = stream
         self.axObserver = axObserver
         self.onActivation = onActivation
+        self.invalidateCapture = invalidateCapture
     }
 
     deinit { stop() }
@@ -54,6 +57,9 @@ final class WorkspaceObserver: NSObject {
     func recordSessionEnded(reason: String) {
         guard sessionActive else { return }
         sessionActive = false
+        axObserver.stop()
+        stream.invalidateSession()
+        invalidateCapture()
         stream.emitSession(.sessionEnded, reason: reason)
     }
 

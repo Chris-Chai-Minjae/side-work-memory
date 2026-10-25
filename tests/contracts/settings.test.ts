@@ -16,6 +16,7 @@ test("Given minimal v2 settings, when parsed, then approved defaults are applied
         captureTypedText: true,
         screenOcr: true,
         asideAdapter: false,
+        browserHistoryEnabled: false,
       },
       providers: [],
       summary: {
@@ -156,6 +157,20 @@ test("Given a flat camelCase UI patch, when parsed, then only the selected leave
   expect(SettingsPatchSchema.safeParse({ enabled: true, screenOcr: false }).success).toBe(true)
   expect(SettingsPatchSchema.safeParse({ contextAwareness: { enabled: true } }).success).toBe(false)
   expect(SettingsPatchSchema.safeParse({ version: 1 }).success).toBe(false)
+})
+
+test("Given URL rules with DNS trailing dots, when settings and patches are parsed, then canonical hostnames are stored", () => {
+  const rule = { scope: "url", behavior: "do_not_observe", urlDomain: "Mail.Example.COM." } as const
+  expect(
+    SettingsSchema.parse({ version: 2, contextAwareness: { rules: [rule] } }).contextAwareness
+      .rules,
+  ).toEqual([{ ...rule, urlDomain: "mail.example.com" }])
+  expect(SettingsPatchSchema.parse({ rules: [rule] }).rules).toEqual([
+    { ...rule, urlDomain: "mail.example.com" },
+  ])
+  expect(SettingsPatchSchema.parse({ browserHistoryEnabled: true })).toEqual({
+    browserHistoryEnabled: true,
+  })
 })
 
 test("Given a disk-only retention value, when parsed through each boundary, then only disk settings allow it", () => {

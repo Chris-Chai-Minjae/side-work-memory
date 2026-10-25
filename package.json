@@ -9,6 +9,12 @@
     "build:web": "rm -rf ./src/web/dist && bun build ./src/web/index.html --target browser --minify --outdir ./src/web/dist",
     "start": "bun run src/cli.ts daemon",
     "test": "bun test",
+    "test:swift": "swift test --package-path apps/side-mac",
+    "gate": "bun run scripts/gates/run-all.ts",
+    "smoke:bundle": "bun run scripts/gates/p5-bundle-smoke.ts",
+    "verify:redistribution": "bun run scripts/gates/verify-redistribution.ts",
+    "version:sync": "bun run scripts/gates/sync-version.ts",
+    "version:check": "bun run scripts/gates/sync-version.ts --check",
     "check": "tsc --noEmit && biome check ."
   },
   "dependencies": {

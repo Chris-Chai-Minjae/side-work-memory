@@ -10,6 +10,14 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(CaptureProtocol.version, 1)
     }
 
+    func testPingUsesCorrelationIDWithoutPayload() throws {
+        let message = try object(from: CaptureProtocol.encodePing(id: "native-42"))
+
+        XCTAssertEqual(message["type"] as? String, "ping")
+        XCTAssertEqual(message["id"] as? String, "native-42")
+        XCTAssertEqual(Set(message.keys), ["type", "id"])
+    }
+
     func testHelloUsesProtocolFieldsAndBase64Key() throws {
         // Given a synthetic 32-byte key.
         let key = Data(repeating: 0x42, count: 32)

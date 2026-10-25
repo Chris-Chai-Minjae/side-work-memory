@@ -8,9 +8,9 @@ const validOutput =
   'Aside REPL banner\nSIDE_ASIDE_SNAPSHOT {"kind":"snapshot","content":"synthetic ARIA tree","beforeTabId":"tab-1","beforeUrl":"https://allowed.example/page?view=1","afterTabId":"tab-1","afterUrl":"https://allowed.example/page?view=1","attachedUrl":"https://allowed.example/page?view=1"}\n'
 
 describe("AsideDomAdapter", () => {
-  test("Given Playwright quoted input keys and input descendants, when sanitized, then no value survives", () => {
+  test("Given sensitive and ordinary input descendants, when sanitized, then all input values are removed", () => {
     const tree = [
-      "- 'textbox \"Security: answer\"': SYNTHETIC_PRIVATE_VALUE",
+      "- 'textbox \"Password: answer\"': SYNTHETIC_PRIVATE_VALUE",
       '- combobox "Choice":',
       '  - option "SYNTHETIC_SELECTION" [selected]',
       '- textbox "Password":',
@@ -29,7 +29,7 @@ describe("AsideDomAdapter", () => {
     expect(safe.suppressed).toBe(3)
   })
 
-  test("Given input values in an ARIA snapshot, when captured, then every input value is removed while page text remains", async () => {
+  test("Given input values in an ARIA snapshot, when captured, then all input values are removed", async () => {
     const tree = [
       '- heading "Project plan"',
       '- link "Guide": /guide',
@@ -69,9 +69,9 @@ describe("AsideDomAdapter", () => {
         '- textbox "Password": [redacted:field]',
         '- textbox "OTP": [redacted:field]',
         '- textbox "Card Number": [redacted:field]',
-        '- textbox "Notes"',
-        "- searchbox",
-        '- combobox "Choice"',
+        '- textbox "Notes": [redacted:field]',
+        "- searchbox: [redacted:field]",
+        '- combobox "Choice": [redacted:field]',
       ].join("\n"),
     })
   })

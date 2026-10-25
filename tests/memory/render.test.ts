@@ -64,7 +64,9 @@ test("Given done window and rollup summaries, when rendered, then the v3 page ha
     expect(page).toContain("## Day overview")
     expect(page).toContain(`Morning work — Reviewed two articles.  s:${rollupId}`)
     expect(page).toContain(`### 09:10 – 09:20 — Read SQLite docs  s:${windowId}`)
-    expect(page).toContain("Sources: [Guide](https://fixture.invalid/guide) — e:")
+    expect(page).toMatch(/Sources: e:[0-9A-HJKMNP-TV-Z]{26}/u)
+    expect(page).not.toContain("[Guide]")
+    expect(page).not.toContain("https://fixture.invalid/guide")
     expect(
       page
         .replace(/^updated_at: .+$/m, "updated_at: <local timestamp>")

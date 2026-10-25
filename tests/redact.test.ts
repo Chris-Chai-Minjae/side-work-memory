@@ -59,6 +59,14 @@ test("Given an overlapping labeled API key, when redacted, then its span is coun
   })
 })
 
+test("Given overlapping password and Bearer matches, when redacted, then their union is masked once", () => {
+  const token = "A".repeat(24)
+  expect(redact(`password: Bearer ${token}`)).toEqual({
+    text: MASK,
+    masks: [{ rule: "labeled-secret", count: 1 }],
+  })
+})
+
 test("Given an OTP beyond 40 characters, when redacted, then no partial number is masked", () => {
   const input = `otp${" ".repeat(36)}123456`
   expect(redact(input)).toEqual({ text: input, masks: [] })

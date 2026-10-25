@@ -38,12 +38,12 @@ final class BrowsersTests: XCTestCase {
         XCTAssertTrue(scripts.calls.allSatisfy { $0.contains("get mode of front window") })
     }
 
-    func testProducerGateAllowsNonBrowserAndDocumentedSafariCaseWithoutScript() {
+    func testProducerGateAllowsNonBrowserButFailsClosedForSafariWithoutScript() {
         let scripts = BrowserScriptStub()
         let browser = makeChrome(scripts: scripts, frontmost: { "com.apple.Safari" })
 
         XCTAssertTrue(browser.isObservableForeground(bundleID: "com.example.Editor"))
-        XCTAssertTrue(browser.isObservableForeground(bundleID: "com.apple.Safari"))
+        XCTAssertFalse(browser.isObservableForeground(bundleID: "com.apple.Safari"))
         XCTAssertTrue(scripts.calls.isEmpty)
     }
 
@@ -61,10 +61,12 @@ final class BrowsersTests: XCTestCase {
     private func makeChrome(
         scripts: BrowserScriptStub,
         automationAllowed: Bool = true,
-        frontmost: @escaping () -> String? = { "com.google.Chrome" }
+        frontmost: @escaping () -> String? = { "com.google.Chrome" },
+        windowID: @escaping () -> UInt32? = { 7 }
     ) -> BrowserCapture {
         BrowserCapture(
             frontmostBundleID: frontmost,
+            foregroundWindowID: { _ in windowID() },
             automationAllowed: { _ in automationAllowed },
             runAppleScript: scripts.run
         )
@@ -237,6 +239,65 @@ final class BrowsersTests: XCTestCase {
         XCTAssertTrue(browser.perAppHealth.isEmpty)
     }
 
+    func testAsyncCaptureBypassesScriptCacheForRawURLVerification() async {
+        let scripts = BrowserScriptStub(
+            modes: ["normal", "normal"],
+            urls: ["https://example.test/page?step=one", "https://example.test/page?step=two"]
+        )
+        let browser = makeChrome(scripts: scripts)
+
+        let result = await browser.captureAsync(bundleID: chrome) {
+            BrowserCaptureContent(text: "synthetic body", axTreeBytes: 3_000)
+        }
+
+        XCTAssertEqual(result, .unavailable(.urlChanged))
+        XCTAssertTrue(browser.perAppHealth.isEmpty)
+    }
+
+    func testProducerCacheStartsClosedAndUsesFreshVerifiedModeAndURL() async {
+        let scripts = BrowserScriptStub(modes: ["normal"], urls: ["https://example.test/private?token=hidden"])
+        let browser = makeChrome(scripts: scripts)
+        XCTAssertFalse(browser.cachedObservableForeground(bundleID: chrome))
+        XCTAssertNil(browser.cachedNormalizedURL(bundleID: chrome))
+
+        await browser.refreshForeground(bundleID: chrome)
+
+        XCTAssertTrue(browser.cachedObservableForeground(bundleID: chrome))
+        XCTAssertEqual(browser.cachedNormalizedURL(bundleID: chrome), "https://example.test/private")
+    }
+
+    func testProducerCacheDoesNotCrossWindowIdentity() async {
+        let scripts = BrowserScriptStub(modes: ["normal"], urls: ["https://example.test/normal"])
+        var windowID: UInt32 = 7
+        let browser = makeChrome(scripts: scripts, windowID: { windowID })
+        await browser.refreshForeground(bundleID: chrome)
+        XCTAssertTrue(browser.cachedObservableForeground(bundleID: chrome))
+
+        windowID = 8
+
+        XCTAssertFalse(browser.cachedObservableForeground(bundleID: chrome))
+        XCTAssertNil(browser.cachedNormalizedURL(bundleID: chrome))
+    }
+
+    func testRefreshDiscardsModeWhenWindowChangesBeforeURLReturns() async {
+        var windowID: UInt32 = 7
+        let browser = BrowserCapture(
+            frontmostBundleID: { self.chrome },
+            foregroundWindowID: { _ in windowID },
+            automationAllowed: { _ in true },
+            runAppleScript: { script in
+                if script.contains("get mode of front window") { return "normal" }
+                windowID = 8
+                return "https://example.test/private"
+            }
+        )
+
+        await browser.refreshForeground(bundleID: chrome)
+
+        XCTAssertFalse(browser.cachedObservableForeground(bundleID: chrome))
+        XCTAssertNil(browser.cachedNormalizedURL(bundleID: chrome))
+    }
+
     func testForegroundChangeDuringCaptureDiscardsContent() {
         // Given Chrome is foreground initially but Safari takes focus during capture.
         let scripts = BrowserScriptStub(modes: ["normal"], urls: ["https://example.test/"])
@@ -256,21 +317,22 @@ final class BrowsersTests: XCTestCase {
         XCTAssertTrue(browser.perAppHealth.isEmpty)
     }
 
-    func testSafariURLQueryDoesNotTreatWindowTitleAsPrivateState() {
-        // Given Safari is foreground and its URL query succeeds.
-        let scripts = BrowserScriptStub(urls: ["https://example.test/", "https://example.test/"])
+    func testSafariCaptureFailsClosedBeforeURLOrContent() {
+        let scripts = BrowserScriptStub(urls: ["https://example.test/"])
         let browser = BrowserCapture(
             frontmostBundleID: { "com.apple.Safari" },
             automationAllowed: { _ in true },
             runAppleScript: scripts.run
         )
+        var reads = 0
 
-        // When capture is requested.
-        let content = BrowserCaptureContent(text: nil, axTreeBytes: 0)
-        let result = browser.capture(bundleID: "com.apple.Safari") { content }
+        let result = browser.capture(bundleID: "com.apple.Safari") {
+            reads += 1
+            return BrowserCaptureContent(text: nil, axTreeBytes: 0)
+        }
 
-        // Then the result uses the URL only; Safari title markers are not a privacy verdict.
-        XCTAssertEqual(result, .captured(url: "https://example.test/", content: content, ocrFallbackNeeded: true))
-        XCTAssertEqual(scripts.calls.count, 2)
+        XCTAssertEqual(result, .unavailable(.privateStateUnknown))
+        XCTAssertEqual(reads, 0)
+        XCTAssertTrue(scripts.calls.isEmpty)
     }
 }

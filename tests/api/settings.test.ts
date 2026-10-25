@@ -80,6 +80,22 @@ test("P4-R2-T1: settings.get exposes provider host and has_key without the Keych
   }
 })
 
+test("Given browser history remains off by default, when enabled through RPC, then the independent setting persists", async () => {
+  const { directory, handlers } = await fixture()
+  try {
+    expect(await handleRpcBody(rpc("settings.get"), handlers)).toMatchObject({
+      result: { browser_history_enabled: false },
+    })
+    expect(
+      await handleRpcBody(rpc("settings.patch", { browserHistoryEnabled: true }), handlers),
+    ).toMatchObject({ result: { browser_history_enabled: true, enabled: false } })
+    expect((await loadSettings(directory)).contextAwareness.browserHistoryEnabled).toBe(true)
+    expect((await loadSettings(directory)).contextAwareness.enabled).toBe(false)
+  } finally {
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
 test("Given an existing settings file, when language is patched, then the root choice persists and reads back", async () => {
   const { directory, handlers } = await fixture()
   try {

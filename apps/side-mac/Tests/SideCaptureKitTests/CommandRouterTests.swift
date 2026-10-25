@@ -10,6 +10,7 @@ private final class FakeRouterServices: CommandRouterServices {
     var secureInputEnabled = false
     var screenOCREnabled = false
     var screenRecordingTrusted = false
+    var captureGeneration = 0
     var deniedBundleIDs: Set<String> = []
     var observeAllowed = true
     var axText: String? = "synthetic body"
@@ -41,23 +42,23 @@ private final class FakeRouterServices: CommandRouterServices {
     func icons(bundleIDs: [String]) -> [RouterIcon] { iconItems.filter { bundleIDs.contains($0.bundleId) } }
     func isDenied(bundleID: String) -> Bool { deniedBundleIDs.contains(bundleID) }
     func mayObserve(bundleID: String) -> Bool { observeAllowed }
-    func captureAX(bundleID: String, windowID: UInt32?) -> String? {
+    func captureAX(bundleID: String, windowID: UInt32?) async -> String? {
         axReads += 1
         onAXRead?()
         return axText
     }
-    func captureBrowser(bundleID: String, readContent: () -> BrowserCaptureContent) -> BrowserCaptureResult {
+    func captureBrowser(bundleID: String, readContent: () async -> BrowserCaptureContent) async -> BrowserCaptureResult {
         browserReads += 1
         if let browserResult { return browserResult }
-        let content = readContent()
+        let content = await readContent()
         return .captured(url: browserURLValue, content: content, ocrFallbackNeeded: content.axTreeBytes < 2_048)
     }
-    func browserURL(bundleID: String) -> BrowserCaptureResult {
+    func browserURL(bundleID: String) async -> BrowserCaptureResult {
         browserReads += 1
         if let browserResult { return browserResult }
         return .captured(url: browserURLValue, content: .init(text: nil, axTreeBytes: 0), ocrFallbackNeeded: true)
     }
-    func rawBrowserURL(bundleID: String) -> String? {
+    func rawBrowserURL(bundleID: String) async -> String? {
         rawURLReads += 1
         return rawURLs.isEmpty ? browserURLValue : rawURLs.removeFirst()
     }
@@ -474,6 +475,21 @@ final class CommandRouterTests: XCTestCase {
         XCTAssertEqual(url["data"] as? String, "https://example.test/page")
         XCTAssertEqual(service.ocrReads, 1)
         XCTAssertEqual(service.browserReads, 1)
+    }
+
+    func testSessionGenerationChangeDuringOCRDiscardsResult() async throws {
+        let service = FakeRouterServices()
+        service.axText = "short"
+        service.screenOCREnabled = true
+        service.screenRecordingTrusted = true
+        service.onOCRRead = { service.captureGeneration += 1 }
+        let router = CommandRouter(services: service)
+
+        let result = try await reply(router, #"{"type":"command","id":"x","name":"capture.request","args":{"targetKey":"com.example.Editor|17|-","shape":"ax","trigger":"navigation"}}"#)
+
+        XCTAssertEqual(result["ok"] as? Bool, false)
+        XCTAssertEqual(result["error"] as? String, "unavailable")
+        XCTAssertNil(result["data"])
     }
 
     func testUnknownAndKeychainCommandsRemainForOtherOwners() async {

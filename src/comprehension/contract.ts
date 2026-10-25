@@ -56,16 +56,17 @@ function maskOutput(value: unknown, path = ""): { value: unknown; rules: readonl
 function subsetRules(value: unknown, briefing: Briefing): string[] {
   const rules: string[] = []
   if (value === null || typeof value !== "object" || Array.isArray(value)) return rules
+  let validRefs = 0
   if ("citations" in value && Array.isArray(value.citations)) {
     for (const [index, citation] of value.citations.entries()) {
       if (
         citation !== null &&
         typeof citation === "object" &&
         "ref" in citation &&
-        typeof citation.ref === "string" &&
-        !briefing.evidenceIds.has(citation.ref)
+        typeof citation.ref === "string"
       ) {
-        rules.push(`citations.${index}.ref: id must appear in briefing`)
+        if (briefing.evidenceIds.has(citation.ref)) validRefs++
+        else rules.push(`citations.${index}.ref: id must appear in briefing`)
       }
     }
   }
@@ -77,13 +78,18 @@ function subsetRules(value: unknown, briefing: Briefing): string[] {
     const entries = Object.entries(value).find(([key]) => key === field)?.[1]
     if (!Array.isArray(entries)) continue
     for (const [index, entry] of entries.entries()) {
-      if (typeof entry === "string" && !allowed.has(entry)) {
+      if (typeof entry !== "string") continue
+      if (allowed.has(entry)) {
+        if (field === "sourceIds") validRefs++
+      } else {
         rules.push(
           `${field}.${index}: ${field === "sourceIds" ? "id" : "value"} must appear in briefing`,
         )
       }
     }
   }
+  if (validRefs === 0 && briefing.evidenceIds.size > 0)
+    rules.push("citations/sourceIds: at least one ref must appear in briefing")
   return rules
 }
 
@@ -123,6 +129,7 @@ export function validateRecordSummary(input: unknown, briefing: Briefing): Summa
     ok: true,
     summary: {
       ...parsed.data,
+      citations: parsed.data.citations.map(({ ref }) => ({ ref })),
       body: `${parsed.data.description.join("\n")}\n\n${parsed.data.memorySummary}`,
     },
   }

@@ -121,6 +121,8 @@ describe("ledger clear", () => {
       insertSummary(db, "within", now - TEN_MINUTES_MS, now)
       insertSummary(db, "crosses-end", now - 1, now + 1)
       insertSummary(db, "before", yesterday, now - TEN_MINUTES_MS - 1)
+      insertSummary(db, "ends-at-start", yesterday, now - TEN_MINUTES_MS)
+      insertSummary(db, "starts-at-end", now, now + 1)
       const dirty: string[] = []
 
       const result = await clearLedger(db, "last10m", {
@@ -131,7 +133,11 @@ describe("ledger clear", () => {
       })
 
       expect(result.deletedSummaries).toBe(3)
-      expect(ids(db, "context_awareness_summaries")).toEqual(["before"])
+      expect(ids(db, "context_awareness_summaries")).toEqual([
+        "before",
+        "ends-at-start",
+        "starts-at-end",
+      ])
       expect(result.dirtyDays).toEqual(["2026-09-24"])
       expect(dirty).toEqual(["2026-09-24"])
       expect(

@@ -1,3 +1,5 @@
+import { errorMetadata } from "./daemon/diagnostics"
+
 const CLIENT_COMMANDS = new Set([
   "status",
   "search",
@@ -61,8 +63,13 @@ async function main(): Promise<void> {
 try {
   await main()
 } catch (error) {
-  console.error(error instanceof Error ? error.message : "Side command failed")
+  const metadata = errorMetadata(error)
+  console.error(
+    metadata.name === "DaemonUnavailableError"
+      ? "Side is not running. Open Side.app."
+      : metadata.name === "HelperUnavailableError"
+        ? "Helper is unavailable"
+        : `Side command failed (${metadata.name}${metadata.code === null ? "" : `/${metadata.code}`})`,
+  )
   process.exitCode = 1
 }
-
-export {}

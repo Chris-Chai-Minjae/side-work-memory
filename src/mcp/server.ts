@@ -1,18 +1,14 @@
 import { randomBytes } from "node:crypto"
-import { constants as fsConstants } from "node:fs"
-import { chmod, mkdir, open } from "node:fs/promises"
 import { join } from "node:path"
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod"
 import { neutralizePromptInjectionText } from "../comprehension/neutralize"
 import { dataDirectory } from "../config/index"
-import {
-  PRIVATE_DIRECTORY_MODE,
-  PRIVATE_FILE_MODE,
-  UNTRUSTED_EVIDENCE_NONCE_BYTES,
-} from "../constants"
+import { READ_CALL_BYTES, UNTRUSTED_EVIDENCE_NONCE_BYTES } from "../constants"
 import { RpcMethods } from "../contracts/rpc"
+import { APP_VERSION } from "../version.generated"
+import { appendUsage } from "./usage-log"
 
 type McpRpcMethod = "search" | "read" | "memorySearch"
 
@@ -59,41 +55,87 @@ function neutralizeMemoryProse(result: unknown) {
   }))
 }
 
-function boundedToolText(method: McpRpcMethod, result: unknown): string {
+type JsonObject = Record<string, unknown>
+
+const jsonBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8")
+
+function shortened(value: string, length: number): string {
+  const prefix = Array.from(value).slice(0, length).join("")
+  const opening = /^<untrusted-evidence nonce="[0-9a-f]{32}">/u.exec(value)?.[0]
+  if (!opening) return prefix
+  const nonce = /nonce="([0-9a-f]{32})"/u.exec(opening)?.[1]
+  const closing = `</untrusted-evidence nonce="${nonce}">`
+  return value.endsWith(closing) ? `${opening}${prefix.slice(opening.length)}${closing}` : prefix
+}
+
+function fitObject(value: JsonObject, maxBytes: number): JsonObject {
+  let result = { ...value }
+  if (jsonBytes(result) <= maxBytes) return result
+  const fields = Object.keys(result)
+    .filter((field) => field !== "url" && typeof result[field] === "string")
+    .sort((left, right) => String(result[right]).length - String(result[left]).length)
+  for (const field of fields) {
+    if (jsonBytes(result) <= maxBytes) break
+    const current = result[field]
+    if (typeof current !== "string") continue
+    const characters = Array.from(current)
+    let low = 0
+    let high = characters.length
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2)
+      const candidate = { ...result, [field]: shortened(current, middle) }
+      if (jsonBytes(candidate) <= maxBytes) low = middle
+      else high = middle - 1
+    }
+    const fitted = { ...result, [field]: shortened(current, low) }
+    if (jsonBytes(fitted) < jsonBytes(result)) result = fitted
+  }
+  if (jsonBytes(result) > maxBytes && typeof result["url"] === "string")
+    result = { ...result, url: null }
+  return result
+}
+
+function fitJson(value: unknown, maxBytes: number): unknown {
+  if (jsonBytes(value) <= maxBytes) return value
+  if (Array.isArray(value)) {
+    if (value.length === 0) return value
+    const first = fitJson(value[0], maxBytes - 2)
+    const candidates = [first, ...value.slice(1)]
+    let low = 0
+    let high = candidates.length
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2)
+      if (jsonBytes(candidates.slice(0, middle)) <= maxBytes) low = middle
+      else high = middle - 1
+    }
+    return candidates.slice(0, low)
+  }
+  if (value !== null && typeof value === "object") return fitObject(value as JsonObject, maxBytes)
+  if (typeof value === "string") {
+    let low = 0
+    let high = Array.from(value).length
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2)
+      if (jsonBytes(shortened(value, middle)) <= maxBytes) low = middle
+      else high = middle - 1
+    }
+    return shortened(value, low)
+  }
+  return value
+}
+
+export function boundedToolText(method: McpRpcMethod, result: unknown): string {
   const nonce = randomBytes(UNTRUSTED_EVIDENCE_NONCE_BYTES).toString("hex")
-  const evidence = JSON.stringify(
+  const opening = `<untrusted-evidence nonce="${nonce}">`
+  const closing = `</untrusted-evidence nonce="${nonce}">`
+  const normalized =
     method === "read"
-      ? result
+      ? RpcMethods.read.output.parse(result)
       : method === "search"
         ? neutralizeSearchProse(result)
-        : neutralizeMemoryProse(result),
-  )
-  return `<untrusted-evidence nonce="${nonce}">${evidence}</untrusted-evidence nonce="${nonce}">`
-}
-
-type UsageRecord = {
-  readonly timestamp: number
-  readonly clientName: string
-  readonly tool: string
-  readonly resultCount: number
-  readonly latencyMs: number
-}
-
-async function appendUsage(record: UsageRecord): Promise<void> {
-  const runDirectory = join(dataDirectory(), "run")
-  await mkdir(runDirectory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
-  await chmod(runDirectory, PRIVATE_DIRECTORY_MODE)
-  const file = await open(
-    join(runDirectory, "mcp-usage.jsonl"),
-    fsConstants.O_APPEND | fsConstants.O_CREAT | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
-    PRIVATE_FILE_MODE,
-  )
-  try {
-    await file.chmod(PRIVATE_FILE_MODE)
-    await file.writeFile(`${JSON.stringify(record)}\n`)
-  } finally {
-    await file.close()
-  }
+        : neutralizeMemoryProse(result)
+  const maxBytes = READ_CALL_BYTES - Buffer.byteLength(opening + closing, "utf8")
+  return `${opening}${JSON.stringify(fitJson(normalized, maxBytes))}${closing}`
 }
 
 async function callDaemon(method: McpRpcMethod, params: unknown): Promise<unknown> {
@@ -123,8 +165,12 @@ async function callDaemon(method: McpRpcMethod, params: unknown): Promise<unknow
 }
 
 export function createMcpServer(): McpServer {
-  const server = new McpServer({ name: "side", version: "0.1.0" })
-  const invoke = async (tool: string, method: McpRpcMethod, params: unknown) => {
+  const server = new McpServer({ name: "side", version: APP_VERSION })
+  const invoke = async (
+    tool: "history_search" | "history_read" | "memory_search",
+    method: McpRpcMethod,
+    params: unknown,
+  ) => {
     const started = performance.now()
     let resultCount = 0
     try {
@@ -137,14 +183,15 @@ export function createMcpServer(): McpServer {
       return { isError: true, content: [{ type: "text" as const, text: message }] }
     } finally {
       const usage = {
-        clientName: server.server.getClientVersion()?.name ?? "unknown",
+        clientName:
+          (server.server.getClientVersion()?.name ?? "unknown").slice(0, 128) || "unknown",
         tool,
         resultCount,
         latencyMs: Math.round(performance.now() - started),
       }
       console.error(JSON.stringify(usage))
       // File logging is best effort; stderr keeps the same metadata if the file is unavailable.
-      await Promise.allSettled([appendUsage({ timestamp: Date.now(), ...usage })])
+      await Promise.allSettled([appendUsage(dataDirectory(), { timestamp: Date.now(), ...usage })])
     }
   }
 

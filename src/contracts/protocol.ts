@@ -44,6 +44,7 @@ const HelloSchema = z.strictObject({
   key: z.string().regex(/^[A-Za-z0-9+/]{43}=$/),
   appVersion: z.string(),
 })
+const PingMessageSchema = z.strictObject({ type: z.literal("ping"), id: z.string() })
 const HealthMessageSchema = z.strictObject({
   type: z.literal("health"),
   health: HelperHealthSchema,
@@ -68,6 +69,7 @@ const ProtocolErrorSchema = z.strictObject({
 
 export const AppToDaemonMessageSchema = z.union([
   HelloSchema,
+  PingMessageSchema,
   HealthMessageSchema,
   EventMessageSchema,
   ResultSuccessSchema,
@@ -79,6 +81,7 @@ const WithoutArgs = z.undefined().optional()
 const CommandBase = { type: z.literal("command"), id: z.string() }
 export const DaemonToAppMessageSchema = z.union([
   ProtocolErrorSchema,
+  z.strictObject({ type: z.literal("pong"), id: z.string() }),
   z.discriminatedUnion("name", [
     z.strictObject({ ...CommandBase, name: z.literal("health"), args: WithoutArgs }),
     z.strictObject({ ...CommandBase, name: z.literal("permissions"), args: WithoutArgs }),

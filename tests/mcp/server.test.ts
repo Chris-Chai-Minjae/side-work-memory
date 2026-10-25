@@ -7,9 +7,12 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { z } from "zod"
 import { createEvidenceHandlers } from "../../src/api/resources/evidence"
 import { startApiServer } from "../../src/api/server"
+import { READ_CALL_BYTES } from "../../src/constants"
 import { RpcMethods } from "../../src/contracts/rpc"
 import { openLedger } from "../../src/ledger/schema"
 import { writeLedgerEvent } from "../../src/ledger/write"
+import { boundedToolText } from "../../src/mcp/server"
+import { APP_VERSION } from "../../src/version.generated"
 
 const SOURCE_ID = "e:01ARZ3NDEKTSV4RRFFQ69G5FAV"
 const UNTRUSTED_WARNING =
@@ -34,6 +37,54 @@ function boundedToolPayload(result: Awaited<ReturnType<Client["callTool"]>>): un
   }
   return JSON.parse(item.text.slice(opening[0].length, -closing.length))
 }
+
+test("MCP final response includes both nonce boundaries within the byte cap and keeps JSON valid", () => {
+  const innerNonce = "a".repeat(32)
+  const read = {
+    id: SOURCE_ID,
+    occurred_at: 1_790_232_000_000,
+    app: "Synthetic Browser",
+    title: "Synthetic title",
+    url: "https://fixture.invalid/page",
+    text: `<untrusted-evidence nonce="${innerNonce}">${"🧪가".repeat(READ_CALL_BYTES)}</untrusted-evidence nonce="${innerNonce}">`,
+    expired: false,
+  }
+  const bounded = boundedToolText("read", read)
+  const opening = /^<untrusted-evidence nonce="([0-9a-f]{32})">/u.exec(bounded)
+  expect(opening).not.toBeNull()
+  const closing = `</untrusted-evidence nonce="${opening?.[1]}">`
+  expect(bounded.endsWith(closing)).toBe(true)
+  expect(Buffer.byteLength(bounded, "utf8")).toBeLessThanOrEqual(READ_CALL_BYTES)
+  const payload = RpcMethods.read.output.parse(
+    JSON.parse(bounded.slice(opening?.[0].length, -closing.length)),
+  )
+  if (payload === null) throw new Error("Expected bounded read payload")
+  expect(payload.url).toBe(read.url)
+  expect(payload.text.endsWith(`</untrusted-evidence nonce="${innerNonce}">`)).toBe(true)
+  expect(payload.text).not.toContain("�")
+})
+
+test("MCP array responses drop or fit whole records instead of truncating JSON", () => {
+  const hit = {
+    ref: SOURCE_ID,
+    occurredAt: 1_790_232_000_000,
+    app: "Synthetic Browser",
+    title: "Synthetic title",
+    url: "https://fixture.invalid/page",
+    domain: "fixture.invalid",
+    snippet: "가".repeat(READ_CALL_BYTES),
+    score: 1,
+  }
+  const bounded = boundedToolText("search", [hit, { ...hit, ref: `e:${"1".repeat(26)}` }])
+  const opening = /^<untrusted-evidence nonce="([0-9a-f]{32})">/u.exec(bounded)
+  const closing = `</untrusted-evidence nonce="${opening?.[1]}">`
+  expect(Buffer.byteLength(bounded, "utf8")).toBeLessThanOrEqual(READ_CALL_BYTES)
+  const payload = RpcMethods.search.output.parse(
+    JSON.parse(bounded.slice(opening?.[0].length, -closing.length)),
+  )
+  expect(payload).toHaveLength(1)
+  expect(payload[0]?.ref).toBe(SOURCE_ID)
+})
 
 async function withClient(
   run: (client: Client, root: string, logs: readonly string[]) => Promise<void>,
@@ -117,6 +168,7 @@ test("P3-T3.8: SDK client lists three bounded tools and receives daemon UDS resu
       },
     })
     try {
+      expect(client.getServerVersion()).toMatchObject({ version: APP_VERSION })
       const listed = await client.listTools()
       expect(listed.tools.map((tool) => tool.name).sort()).toEqual([
         "history_read",

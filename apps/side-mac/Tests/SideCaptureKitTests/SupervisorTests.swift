@@ -5,6 +5,123 @@ import XCTest
 @testable import Side
 
 final class SupervisorTests: XCTestCase {
+    @MainActor
+    func testUnexpectedSuccessfulExitRestartsInsteadOfStoppingCapture() async throws {
+        // Given a daemon that exits successfully on its first health frame.
+        let (directory, daemon) = try makeDaemonScript { directory in
+            let marker = directory.appendingPathComponent("first-start").path
+            return "IFS= read -r hello\nif [ ! -e '\(marker)' ]; then\n  : > '\(marker)'\n  IFS= read -r health\n  exit 0\nfi\nwhile IFS= read -r frame; do :; done\n"
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let supervisor = DaemonSupervisor(daemonURL: daemon, keyStore: FakeKeyStore())
+        defer { supervisor.stop() }
+        let restarted = expectation(description: "capture daemon restarts after unexpected exit 0")
+        var starts = 0
+        supervisor.onStateChange = { state in
+            if state == .running {
+                starts += 1
+                if starts == 2 { restarted.fulfill() }
+            }
+        }
+        supervisor.start()
+        try await waitForState(.running, in: supervisor)
+
+        // When the still-supervised daemon exits with status 0.
+        try supervisor.sendHealth(HelperHealth())
+
+        // Then capture recovers without restarting the menu bar app.
+        await fulfillment(of: [restarted], timeout: 5)
+        XCTAssertEqual(supervisor.state, .running)
+    }
+
+    @MainActor
+    func testProtocolFailureRestartsDaemonAfterGracefulTermination() async throws {
+        // Given a daemon that handles SIGTERM with a successful exit.
+        let (directory, daemon) = try makeDaemonScript { directory in
+            let marker = directory.appendingPathComponent("first-start").path
+            return "IFS= read -r hello\ntrap 'exit 0' TERM\nif [ ! -e '\(marker)' ]; then\n  : > '\(marker)'\n  printf '%s\\n' '{\"type\":\"protocol-error\",\"message\":\"synthetic failure\"}'\nfi\nwhile IFS= read -r frame; do :; done\n"
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let supervisor = DaemonSupervisor(daemonURL: daemon, keyStore: FakeKeyStore())
+        defer { supervisor.stop() }
+        let restarted = expectation(description: "protocol failure triggers recovery despite exit 0")
+        var starts = 0
+        supervisor.onStateChange = { state in
+            if state == .running {
+                starts += 1
+                if starts == 2 { restarted.fulfill() }
+            }
+        }
+
+        // When the daemon reports a protocol failure and the app terminates it.
+        supervisor.start()
+
+        // Then the graceful termination is still treated as an unexpected exit.
+        await fulfillment(of: [restarted], timeout: 10)
+        XCTAssertEqual(supervisor.state, .running)
+    }
+
+    @MainActor
+    func testRunningWaitsForFirstHealthAfterHello() async throws {
+        let (directory, daemon) = try makeDaemonScript { _ in
+            "IFS= read -r hello\nwhile IFS= read -r ignored; do :; done\n"
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let supervisor = DaemonSupervisor(daemonURL: daemon, appVersion: "test", keyStore: FakeKeyStore())
+        supervisor.onProcessReady = {}
+        supervisor.start()
+        defer { supervisor.stop() }
+        for _ in 0..<100 where supervisor.daemonPID == nil {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(supervisor.state, .starting)
+        try supervisor.sendHealth(HelperHealth())
+        XCTAssertEqual(supervisor.state, .running)
+    }
+
+    @MainActor
+    func testResponsivePongPreventsWatchdogRecovery() async throws {
+        let (directory, daemon) = try makeDaemonScript { _ in
+            "IFS= read -r hello\nn=0\nwhile IFS= read -r frame; do\n  case \"$frame\" in\n    *'\"type\":\"ping\"'*) n=$((n + 1)); printf '%s\\n' \"{\\\"type\\\":\\\"pong\\\",\\\"id\\\":\\\"native-$n\\\"}\" ;;\n  esac\ndone\n"
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let supervisor = DaemonSupervisor(
+            daemonURL: daemon, appVersion: "test", keyStore: FakeKeyStore(),
+            pingInterval: 0.05, pingTimeout: 1, terminationGrace: 0.1
+        )
+        supervisor.start()
+        defer { supervisor.stop() }
+        try await waitForState(.running, in: supervisor)
+        try await Task.sleep(nanoseconds: 350_000_000)
+
+        XCTAssertEqual(supervisor.state, .running)
+    }
+
+    @MainActor
+    func testHungDaemonIsKilledAfterTermGraceAndRecovered() async throws {
+        let (directory, daemon) = try makeDaemonScript { directory in
+            let marker = directory.appendingPathComponent("first-start").path
+            return "IFS= read -r hello\nif [ ! -e '\(marker)' ]; then\n  : > '\(marker)'\n  trap '' TERM\nfi\nwhile IFS= read -r ignored; do :; done\n"
+        }
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let supervisor = DaemonSupervisor(
+            daemonURL: daemon, appVersion: "test", keyStore: FakeKeyStore(),
+            pingInterval: 0.05, pingTimeout: 0.05, terminationGrace: 0.1
+        )
+        let recovering = expectation(description: "hung daemon killed and restart scheduled")
+        supervisor.onStateChange = {
+            if case .waitingToRestart = $0 { recovering.fulfill() }
+        }
+        supervisor.start()
+        defer { supervisor.stop() }
+        try await waitForState(.running, in: supervisor)
+        let pid = try XCTUnwrap(supervisor.daemonPID)
+
+        await fulfillment(of: [recovering], timeout: 2)
+        XCTAssertEqual(kill(pid, 0), -1)
+    }
+
     func testFirstFiveCrashesRestartAndSixthStopsWithinMinute() {
         // Given six synthetic abnormal exits inside one minute.
         var policy = RestartPolicy()
@@ -133,6 +250,7 @@ final class SupervisorTests: XCTestCase {
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         let supervisor = DaemonSupervisor(daemonURL: daemon, appVersion: "test", keyStore: FakeKeyStore())
+        supervisor.onProcessReady = {}
         let delivered = expectation(description: "web session delivered")
         let revoked = expectation(description: "web session revoked")
         supervisor.onWebSessionChange = { session in
@@ -487,7 +605,7 @@ final class SupervisorTests: XCTestCase {
     func testEventAndHealthFramesReachDaemonWithoutRepeatingHello() async throws {
         let (directory, daemon) = try makeDaemonScript { directory in
             let output = directory.appendingPathComponent("frames").path
-            return "IFS= read -r hello\nIFS= read -r event\nIFS= read -r health\nprintf '%s\\n%s\\n' \"$event\" \"$health\" > '\(output).tmp'\nmv '\(output).tmp' '\(output)'\n"
+            return "IFS= read -r hello\nIFS= read -r initial_health\nIFS= read -r event\nIFS= read -r health\nprintf '%s\\n%s\\n' \"$event\" \"$health\" > '\(output).tmp'\nmv '\(output).tmp' '\(output)'\n"
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         let supervisor = DaemonSupervisor(daemonURL: daemon, appVersion: "test", keyStore: FakeKeyStore())
@@ -515,6 +633,7 @@ final class SupervisorTests: XCTestCase {
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         let supervisor = DaemonSupervisor(daemonURL: daemon, appVersion: "test", keyStore: FakeKeyStore())
+        supervisor.onProcessReady = {}
         supervisor.onOtherCommand = { _ in
             try? await Task.sleep(nanoseconds: 20_000_000)
             return try? CaptureProtocol.encodeResultSuccess(id: "async-1", data: ["ok": true])
@@ -536,6 +655,7 @@ final class SupervisorTests: XCTestCase {
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         let supervisor = DaemonSupervisor(daemonURL: daemon, appVersion: "test", keyStore: FakeKeyStore())
+        supervisor.onProcessReady = {}
         supervisor.onOtherCommand = { _ in
             try? CaptureProtocol.encodeResultSuccess(id: "wrong-1", data: ["ok": true])
         }
@@ -549,20 +669,22 @@ final class SupervisorTests: XCTestCase {
     }
 
     @MainActor
-    func testTransportWriteErrorPropagatesWithoutLeakingFrame() async throws {
+    func testTransportWriteErrorRecoversOffMainActor() async throws {
         let (directory, daemon) = try makeDaemonScript { _ in
-            "IFS= read -r hello\nIFS= read -r ignored\n"
+            "IFS= read -r hello\nwhile IFS= read -r ignored; do :; done\n"
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         let supervisor = DaemonSupervisor(daemonURL: daemon, appVersion: "test", keyStore: FakeKeyStore())
+        supervisor.writeData = { _, _ in throw NSError(domain: "SyntheticWrite", code: 1) }
+        let recovering = expectation(description: "asynchronous write failure schedules recovery")
+        supervisor.onStateChange = {
+            if case .waitingToRestart = $0 { recovering.fulfill() }
+        }
+
         supervisor.start()
         defer { supervisor.stop() }
-        try await waitForState(.running, in: supervisor)
-        supervisor.writeData = { _, _ in throw NSError(domain: "SyntheticWrite", code: 1) }
 
-        XCTAssertThrowsError(try supervisor.sendEvent(["kind": "window.changed"])) { error in
-            XCTAssertEqual((error as NSError).domain, "SyntheticWrite")
-        }
+        await fulfillment(of: [recovering], timeout: 2)
     }
 
     @MainActor
@@ -574,6 +696,11 @@ final class SupervisorTests: XCTestCase {
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         let supervisor = DaemonSupervisor(daemonURL: daemon, appVersion: "test", keyStore: FakeKeyStore())
+        var readyCount = 0
+        supervisor.onProcessReady = { [weak supervisor] in
+            readyCount += 1
+            if readyCount == 2 { try? supervisor?.sendHealth(HelperHealth()) }
+        }
         let began = expectation(description: "old command reached async router")
         var finishOld: CheckedContinuation<Data?, Never>?
         supervisor.onOtherCommand = { _ in
@@ -588,7 +715,6 @@ final class SupervisorTests: XCTestCase {
         defer { supervisor.stop() }
         finishOld?.resume(returning: try CaptureProtocol.encodeResultSuccess(id: "old-1", data: ["ok": true]))
         try await Task.sleep(nanoseconds: 100_000_000)
-        try supervisor.sendHealth(HelperHealth())
 
         let frame = try object(from: await waitForFile(directory.appendingPathComponent("new-frame")))
         XCTAssertEqual(frame["type"] as? String, "health")

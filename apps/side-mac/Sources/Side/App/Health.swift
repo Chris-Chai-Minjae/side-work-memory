@@ -7,7 +7,7 @@ final class HelperHealthMonitor {
 
     private let permissions: PermissionCoordinator
     private let sample: () -> HelperHealth
-    private let send: (Data) -> Void
+    private let send: (Data) throws -> Void
     private let now: () -> Date
     private var timer: Timer?
     private var lastBody: Data?
@@ -16,7 +16,7 @@ final class HelperHealthMonitor {
     init(
         permissions: PermissionCoordinator,
         sample: @escaping () -> HelperHealth,
-        send: @escaping (Data) -> Void,
+        send: @escaping (Data) throws -> Void,
         now: @escaping () -> Date = Date.init
     ) {
         self.permissions = permissions
@@ -47,6 +47,11 @@ final class HelperHealthMonitor {
         timer = nil
     }
 
+    func resetForDaemonGeneration() {
+        lastBody = nil
+        lastSentAt = nil
+    }
+
     // Call after any capture state mutation for an immediate change report.
     func refresh() throws {
         let permissionStatus = permissions.preflight()
@@ -72,7 +77,7 @@ final class HelperHealthMonitor {
             timestamp.timeIntervalSince($0) >= Self.heartbeatInterval
         } ?? true
         guard body != lastBody || heartbeatDue else { return }
-        send(try CaptureProtocol.encodeHealth(health))
+        try send(try CaptureProtocol.encodeHealth(health))
         lastBody = body
         lastSentAt = timestamp
     }

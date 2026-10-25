@@ -22,48 +22,56 @@ let webDirectory: string
 
 beforeAll(async () => {
   webDirectory = mkdtempSync(join(tmpdir(), "side-day-web-"))
-  const built = Bun.spawnSync({
-    cmd: [
-      process.execPath,
-      "build",
-      "./src/web/index.html",
-      "--target",
-      "browser",
-      "--minify",
-      "--outdir",
-      webDirectory,
-    ],
-    cwd: join(import.meta.dir, "..", ".."),
-  })
-  if (built.exitCode !== 0) throw new Error(built.stderr.toString())
-  browser = await chromium.launch({ channel: "chrome", headless: true })
+  try {
+    const built = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        "build",
+        "./src/web/index.html",
+        "--target",
+        "browser",
+        "--minify",
+        "--outdir",
+        webDirectory,
+      ],
+      cwd: join(import.meta.dir, "..", ".."),
+    })
+    if (built.exitCode !== 0) throw new Error(built.stderr.toString())
+    browser = await chromium.launch({ channel: "chrome", headless: true })
+  } catch (error) {
+    rmSync(webDirectory, { recursive: true, force: true })
+    throw error
+  }
 })
 
 afterAll(async () => {
-  await browser?.close()
-  // Bun sqlite transaction wrappers retain closed connections until collection.
-  Bun.gc(true)
-  if (webDirectory) rmSync(webDirectory, { recursive: true, force: true })
-})
+  try {
+    await browser?.close()
+  } finally {
+    Bun.gc(true)
+    if (webDirectory) rmSync(webDirectory, { recursive: true, force: true })
+  }
+}, 30_000)
 
 async function withPage(
   run: (page: Page, fixture: Fixture) => Promise<void>,
   options: PageOptions = {},
 ): Promise<void> {
   const fixture = await startDayFixture(webDirectory)
-  expect(fixture.port).toBe(fixture.daemonPort)
-  expect(existsSync(fixture.relayPath)).toBe(false)
-  expect(JSON.parse(readFileSync(fixture.webPublicationPath, "utf8"))).toEqual({
-    port: fixture.port,
-    tokenHash: fixture.tokenHash,
-  })
-  expect(readFileSync(fixture.webPublicationPath, "utf8")).not.toContain(fixture.token)
   let context: BrowserContext | null = null
+  let page: Page | null = null
   try {
+    expect(fixture.port).toBe(fixture.daemonPort)
+    expect(existsSync(fixture.relayPath)).toBe(false)
+    expect(JSON.parse(readFileSync(fixture.webPublicationPath, "utf8"))).toEqual({
+      port: fixture.port,
+      tokenHash: fixture.tokenHash,
+    })
+    expect(readFileSync(fixture.webPublicationPath, "utf8")).not.toContain(fixture.token)
     context = await browser.newContext({
       timezoneId: Intl.DateTimeFormat().resolvedOptions().timeZone,
     })
-    const page = await context.newPage()
+    page = await context.newPage()
     page.setDefaultTimeout(10_000)
     const errors: string[] = []
     const rpcRequests: { readonly url: string; readonly authorization: string | undefined }[] = []
@@ -115,9 +123,13 @@ async function withPage(
     expect(errors).toEqual([])
   } finally {
     try {
-      await context?.close()
+      await page?.close()
     } finally {
-      await fixture.close()
+      try {
+        await context?.close()
+      } finally {
+        await fixture.close()
+      }
     }
   }
 }

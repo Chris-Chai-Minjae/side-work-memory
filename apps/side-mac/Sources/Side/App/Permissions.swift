@@ -133,6 +133,12 @@ final class PermissionCoordinator {
         )
         let previous = status
         status = current
+        if screenOCREnabled && previous?.screenRecording == false && current.screenRecording {
+            defaults.set(permissionSheetVisible, forKey: Self.resumeSheetKey)
+            onScreenRecordingGranted()
+            if previous != current { onChange?(current) }
+            return current
+        }
         if current.accessibility && previous?.accessibility != true {
             onAccessibilityGranted()
         }
@@ -140,10 +146,6 @@ final class PermissionCoordinator {
             onInputMonitoringChanged(true)
         } else if previous?.inputMonitoring == true && !current.inputMonitoring {
             onInputMonitoringChanged(false)
-        }
-        if screenOCREnabled && previous?.screenRecording == false && current.screenRecording {
-            defaults.set(permissionSheetVisible, forKey: Self.resumeSheetKey)
-            onScreenRecordingGranted()
         }
         if previous != current { onChange?(current) }
         return current

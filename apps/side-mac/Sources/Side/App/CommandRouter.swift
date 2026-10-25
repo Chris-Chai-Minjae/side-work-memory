@@ -27,6 +27,7 @@ protocol CommandRouterServices: AnyObject {
     var secureInputEnabled: Bool { get }
     var screenOCREnabled: Bool { get }
     var screenRecordingTrusted: Bool { get }
+    var captureGeneration: Int { get }
 
     func healthSnapshot() -> HelperHealth
     func permissionStatus() -> PermissionStatus
@@ -35,10 +36,10 @@ protocol CommandRouterServices: AnyObject {
     func icons(bundleIDs: [String]) -> [RouterIcon]
     func isDenied(bundleID: String) -> Bool
     func mayObserve(bundleID: String) -> Bool
-    func captureAX(bundleID: String, windowID: UInt32?) -> String?
-    func captureBrowser(bundleID: String, readContent: () -> BrowserCaptureContent) -> BrowserCaptureResult
-    func browserURL(bundleID: String) -> BrowserCaptureResult
-    func rawBrowserURL(bundleID: String) -> String?
+    func captureAX(bundleID: String, windowID: UInt32?) async -> String?
+    func captureBrowser(bundleID: String, readContent: () async -> BrowserCaptureContent) async -> BrowserCaptureResult
+    func browserURL(bundleID: String) async -> BrowserCaptureResult
+    func rawBrowserURL(bundleID: String) async -> String?
     func captureOCR(windowID: UInt32) async throws -> String?
     func configure(_ configuration: ObserverConfiguration)
     func openSettings()
@@ -52,6 +53,7 @@ final class LiveCommandRouterServices: CommandRouterServices {
     private let inputTap: InputTap
     private let permissions: PermissionCoordinator
     private let browser: BrowserCapture
+    private let axWorker = NativeStringWorker(cacheLifetime: 0.1)
     private let sampleHealth: () -> HelperHealth
     private let showSettings: () -> Void
     private var deniedBundleIDs: Set<String> = []
@@ -60,6 +62,7 @@ final class LiveCommandRouterServices: CommandRouterServices {
     var foreground: AXSnapshotForeground? { AXSnapshotForeground.current() }
     var secureInputEnabled: Bool { stream.isSecureInputEnabled }
     var screenRecordingTrusted: Bool { permissions.preflight().screenRecording }
+    var captureGeneration: Int { stream.generation }
 
     init(
         stream: CaptureStream, observerHub: AXObserverHub, workspaceObserver: WorkspaceObserver,
@@ -182,23 +185,32 @@ final class LiveCommandRouterServices: CommandRouterServices {
 
     func mayObserve(bundleID: String) -> Bool { stream.mayObserve(bundleID: bundleID) }
 
-    func captureAX(bundleID: String, windowID: UInt32?) -> String? {
-        AXSnapshot<LiveAXSnapshotReader>().capture(bundleID: bundleID, windowID: windowID)
+    func captureAX(bundleID: String, windowID: UInt32?) async -> String? {
+        let before = foreground
+        guard before?.bundleID == bundleID else { return nil }
+        let key = "ax:\(bundleID):\(windowID.map(String.init) ?? "front")"
+        let text = try? await axWorker.call(key: key) {
+            AXSnapshot<LiveAXSnapshotReader>().capture(bundleID: bundleID, windowID: windowID)
+        }
+        guard foreground == before else { return nil }
+        return text
     }
 
-    func captureBrowser(bundleID: String, readContent: () -> BrowserCaptureContent) -> BrowserCaptureResult {
-        browser.capture(bundleID: bundleID, readContent: readContent)
+    func captureBrowser(
+        bundleID: String,
+        readContent: () async -> BrowserCaptureContent
+    ) async -> BrowserCaptureResult {
+        await browser.captureAsync(bundleID: bundleID, readContent: readContent)
     }
 
-    func browserURL(bundleID: String) -> BrowserCaptureResult {
-        BrowserCapture().capture(bundleID: bundleID) { BrowserCaptureContent(text: nil, axTreeBytes: 0) }
+    func browserURL(bundleID: String) async -> BrowserCaptureResult {
+        await browser.captureAsync(bundleID: bundleID) {
+            BrowserCaptureContent(text: nil, axTreeBytes: 0)
+        }
     }
 
-    func rawBrowserURL(bundleID: String) -> String? {
-        guard let source = BrowserCapture.urlScript(for: bundleID),
-              let script = NSAppleScript(source: source) else { return nil }
-        var error: NSDictionary?
-        return script.executeAndReturnError(&error).stringValue
+    func rawBrowserURL(bundleID: String) async -> String? {
+        await browser.rawBrowserURL(bundleID: bundleID)
     }
 
     func captureOCR(windowID: UInt32) async throws -> String? {
@@ -333,7 +345,7 @@ final class CommandRouter {
             guard let args = decode(RouterBrowserArgs.self, from: line), !args.bundleId.isEmpty else {
                 return failure(header.id, "invalid-arguments")
             }
-            switch browserURL(bundleID: args.bundleId) {
+            switch await browserURL(bundleID: args.bundleId) {
             case .success(let url): return success(header.id, url)
             case .failure(let code): return failure(header.id, code.rawValue)
             }
@@ -365,13 +377,14 @@ final class CommandRouter {
               before.bundleID == target.bundleID,
               target.windowID == nil || before.windowID == target.windowID else { return .failure(.unavailable) }
 
+        let generation = services.captureGeneration
         let isBrowser = BrowserCapture.urlScript(for: target.bundleID) != nil
         var text: String?
         var url: String?
         var ocrFallbackNeeded = false
         if isBrowser {
-            switch services.captureBrowser(bundleID: target.bundleID, readContent: {
-                let extracted = services.captureAX(bundleID: target.bundleID, windowID: target.windowID)
+            switch await services.captureBrowser(bundleID: target.bundleID, readContent: {
+                let extracted = await services.captureAX(bundleID: target.bundleID, windowID: target.windowID)
                 return BrowserCaptureContent(text: extracted, axTreeBytes: extracted?.utf8.count ?? 0)
             }) {
             case .captured(let capturedURL, let content, let needsOCR):
@@ -386,17 +399,19 @@ final class CommandRouter {
             }
         } else {
             guard target.url == nil else { return .failure(.unavailable) }
-            text = services.captureAX(bundleID: target.bundleID, windowID: target.windowID)
+            text = await services.captureAX(bundleID: target.bundleID, windowID: target.windowID)
             ocrFallbackNeeded = (text?.utf8.count ?? 0) < 2_048
         }
-        guard services.foreground == before else { return .failure(.unavailable) }
+        guard services.foreground == before, services.captureGeneration == generation else {
+            return .failure(.unavailable)
+        }
 
         var kind = RouterObservation.Kind.snapshot
         var shape = RouterObservation.Shape.ax
         var content = text ?? ""
         if ocrFallbackNeeded, services.screenOCREnabled,
            services.screenRecordingTrusted, let windowID = before.windowID {
-            let rawBefore = isBrowser ? services.rawBrowserURL(bundleID: target.bundleID) : nil
+            let rawBefore = isBrowser ? await services.rawBrowserURL(bundleID: target.bundleID) : nil
             if isBrowser && rawBefore == nil { return .failure(.unavailable) }
             do {
                 if let recognized = try await services.captureOCR(windowID: windowID), !recognized.isEmpty {
@@ -408,17 +423,17 @@ final class CommandRouter {
                 return .failure(.unavailable)
             }
             if isBrowser {
-                switch browserURL(bundleID: target.bundleID) {
+                switch await browserURL(bundleID: target.bundleID) {
                 case .success(let afterURL) where afterURL == url: break
                 case .failure(let code): return .failure(code)
                 default: return .failure(.unavailable)
                 }
-                guard services.rawBrowserURL(bundleID: target.bundleID) == rawBefore else {
+                guard await services.rawBrowserURL(bundleID: target.bundleID) == rawBefore else {
                     return .failure(.unavailable)
                 }
             }
         }
-        guard services.foreground == before,
+        guard services.foreground == before, services.captureGeneration == generation,
               !services.isDenied(bundleID: target.bundleID),
               services.mayObserve(bundleID: target.bundleID), !services.secureInputEnabled else {
             return .failure(.unavailable)
@@ -436,15 +451,16 @@ final class CommandRouter {
               !services.secureInputEnabled,
               services.mayObserve(bundleID: before.bundleID),
               services.screenOCREnabled, services.screenRecordingTrusted else { return .failure(.unavailable) }
+        let generation = services.captureGeneration
         let isBrowser = BrowserCapture.urlScript(for: before.bundleID) != nil
         let url: String?
         let rawBefore: String?
         if isBrowser {
-            switch browserURL(bundleID: before.bundleID) {
+            switch await browserURL(bundleID: before.bundleID) {
             case .success(let resolved): url = resolved
             case .failure(let code): return .failure(code)
             }
-            rawBefore = services.rawBrowserURL(bundleID: before.bundleID)
+            rawBefore = await services.rawBrowserURL(bundleID: before.bundleID)
             guard rawBefore != nil else { return .failure(.unavailable) }
         } else {
             url = nil
@@ -452,17 +468,17 @@ final class CommandRouter {
         }
         do {
             guard let text = try await services.captureOCR(windowID: windowID), !text.isEmpty,
-                  services.foreground == before,
+                  services.foreground == before, services.captureGeneration == generation,
                   !services.secureInputEnabled, services.mayObserve(bundleID: before.bundleID) else {
                 return .failure(.unavailable)
             }
             if isBrowser {
-                switch browserURL(bundleID: before.bundleID) {
+                switch await browserURL(bundleID: before.bundleID) {
                 case .success(let afterURL) where afterURL == url: break
                 case .failure(let code): return .failure(code)
                 default: return .failure(.unavailable)
                 }
-                guard services.rawBrowserURL(bundleID: before.bundleID) == rawBefore else {
+                guard await services.rawBrowserURL(bundleID: before.bundleID) == rawBefore else {
                     return .failure(.unavailable)
                 }
             }
@@ -475,12 +491,12 @@ final class CommandRouter {
         }
     }
 
-    private func browserURL(bundleID: String) -> Result<String, Failure> {
+    private func browserURL(bundleID: String) async -> Result<String, Failure> {
         guard !services.isDenied(bundleID: bundleID) else { return .failure(.denied) }
         guard services.mayObserve(bundleID: bundleID), services.foreground?.bundleID == bundleID else {
             return .failure(.unavailable)
         }
-        switch services.browserURL(bundleID: bundleID) {
+        switch await services.browserURL(bundleID: bundleID) {
         case .captured(let url, _, _): return .success(url)
         case .suppressed: return .failure(.incognito)
         case .unavailable: return .failure(.unavailable)

@@ -101,6 +101,32 @@ test("Given chunked helper frames, when hello, health and event arrive, then the
   expect(Object.values(process.env)).not.toContain(hello.key)
 })
 
+test("Given a post-hello ping, when it arrives, then only its matching pong is written immediately", async () => {
+  const { client, input, sent, running } = harness()
+  await client.waitForHello()
+  const pending = client.sendCommand({ type: "command", name: "health" })
+  input.write(`${JSON.stringify({ type: "ping", id: "native-42" })}\n`)
+  await Bun.sleep(0)
+  expect(sent).toContainEqual({ type: "pong", id: "native-42" })
+  expect(client.health.state).toBe("starting")
+  expect(client["pending"].size).toBe(1)
+  input.end()
+  await running
+  await expect(pending).rejects.toThrow("Helper is unavailable")
+})
+
+test("Given a pre-hello ping, when it arrives, then the existing protocol error rule applies", async () => {
+  const input = new PassThrough()
+  const output = new PassThrough()
+  const errors: HelperProtocolError[] = []
+  const client = new HelperClient({ input, output, onProtocolError: (error) => errors.push(error) })
+  const running = client.run()
+  input.end(`${JSON.stringify({ type: "ping", id: "too-early" })}\n`)
+  await running
+  expect(errors).toHaveLength(1)
+  expect(errors[0]?.message).toBe("Helper message arrived before hello")
+})
+
 test("Given two pending commands, when results arrive in reverse order, then each result matches its id", async () => {
   const { client, input, sent, running } = harness()
   await client.waitForHello()

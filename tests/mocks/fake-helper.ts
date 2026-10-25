@@ -72,7 +72,7 @@ export async function runFakeHelper(scenarioPath?: string): Promise<void> {
       }
       throw error
     }
-    if (message.type === "protocol-error") continue
+    if (message.type === "protocol-error" || message.type === "pong") continue
     let data: unknown
     switch (message.name) {
       case "health":

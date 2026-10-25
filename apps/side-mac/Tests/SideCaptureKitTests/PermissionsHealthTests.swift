@@ -118,6 +118,47 @@ final class PermissionsHealthTests: XCTestCase {
         XCTAssertFalse(resumed.takeResumePermissionSheet())
     }
 
+    func testScreenRecordingRestartHandoffPrecedesOtherGrantCallbacks() {
+        let probe = FakePermissionProbe()
+        let coordinator = PermissionCoordinator(
+            probe: probe, defaults: defaults(),
+            onAccessibilityGranted: { probe.requests.append("observer") },
+            onInputMonitoringChanged: { _ in probe.requests.append("tap") },
+            onScreenRecordingGranted: { probe.requests.append("restart") }
+        )
+        _ = coordinator.preflight()
+        coordinator.configureScreenOCR(enabled: true)
+        probe.accessibility = true
+        probe.inputMonitoring = true
+        probe.screenRecording = true
+
+        _ = coordinator.preflight()
+
+        XCTAssertEqual(probe.requests, ["restart"])
+    }
+
+    func testHealthFailedSendKeepsCacheDirtyAndDaemonResetForcesFirstFrame() throws {
+        let coordinator = PermissionCoordinator(probe: FakePermissionProbe(), defaults: defaults())
+        var frames: [Data] = []
+        var fail = true
+        let monitor = HelperHealthMonitor(
+            permissions: coordinator, sample: { HelperHealth() },
+            send: {
+                if fail { throw NSError(domain: "SyntheticHealth", code: 1) }
+                frames.append($0)
+            }
+        )
+        XCTAssertThrowsError(try monitor.refresh())
+        fail = false
+        try monitor.refresh()
+        try monitor.refresh()
+        XCTAssertEqual(frames.count, 1)
+
+        monitor.resetForDaemonGeneration()
+        try monitor.refresh()
+        XCTAssertEqual(frames.count, 2)
+    }
+
     func testHealthEmitsAllApprovedFieldsOnChangeAndEveryThirtySeconds() throws {
         let probe = FakePermissionProbe()
         probe.accessibility = true

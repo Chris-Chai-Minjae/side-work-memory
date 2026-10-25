@@ -76,8 +76,7 @@ struct LiveAXSnapshotReader: AXSnapshotReading {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXFocusedWindowAttribute as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-        let window = value as! AXUIElement
-        return window
+        return unsafeDowncast(value, to: AXUIElement.self)
     }
 
     func role(of element: AXUIElement) -> String {

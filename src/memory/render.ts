@@ -20,12 +20,7 @@ type SummaryRow = {
   readonly source_ids: string
 }
 
-const CitationSchema = z.object({
-  ref: z.string(),
-  title: z.string().optional(),
-  url: z.string().optional(),
-})
-const CitationsSchema = z.array(CitationSchema)
+const CitationsSchema = z.array(z.object({ ref: z.string() }))
 const StringsSchema = z.array(z.string())
 
 function localDayRange(day: string): { from: number; to: number } {
@@ -71,13 +66,7 @@ function localIso(at: number): string {
 function sources(row: SummaryRow): string {
   const citations = CitationsSchema.parse(JSON.parse(row.citations))
   const sourceIds = StringsSchema.parse(JSON.parse(row.source_ids))
-  const parts = citations.map(({ ref, title, url }) => {
-    const label = title ?? ref
-    const parsedUrl = url ? URL.parse(url) : null
-    return parsedUrl && ["http:", "https:"].includes(parsedUrl.protocol)
-      ? `[${label.replaceAll("]", "\\]")}](${parsedUrl.href}) — ${ref}`
-      : `${label} — ${ref}`
-  })
+  const parts = citations.map(({ ref }) => ref)
   const included = new Set(citations.map(({ ref }) => ref))
   for (const ref of sourceIds) if (!included.has(ref)) parts.push(ref)
   return parts.join(" | ")

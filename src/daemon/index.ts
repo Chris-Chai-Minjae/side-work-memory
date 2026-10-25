@@ -28,6 +28,7 @@ import {
   PRIVATE_DIRECTORY_MODE,
   PRIVATE_FILE_MODE,
   PRIVATE_UMASK,
+  SELECTION_BURST_MS,
   SUPPRESSION_BUCKET_MS,
 } from "../constants"
 import type { HelperHealth } from "../contracts/protocol"
@@ -48,6 +49,9 @@ import { createMemoryIndexSyncScheduler, syncMemoryIndex } from "../memory/sync"
 import { isDeniedApp, isDeniedHost } from "../policy/index"
 import { normalizePageUrl } from "../policy/url"
 import { createBrowserHistoryProvider } from "../recall/browser-history"
+import { truncateWal } from "../sqlite/checkpoint"
+import { DaemonDiagnostics } from "./diagnostics"
+import { acquireDaemonLock } from "./lock"
 import { Reconciler } from "./reconcile"
 
 const BROWSER_BUNDLE_IDS = new Set([
@@ -196,6 +200,18 @@ export async function runDaemon<TimerId = ReturnType<typeof setTimeout>>(
 
 async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promise<void> {
   const directory = options.directory ?? dataDirectory()
+  const lock = acquireDaemonLock(directory)
+  try {
+    await runLockedDaemon(options, directory)
+  } finally {
+    lock.release()
+  }
+}
+
+async function runLockedDaemon<TimerId>(
+  options: DaemonOptions<TimerId>,
+  directory: string,
+): Promise<void> {
   const settings = await loadSettings(directory)
   const ledgerDirectory = join(directory, "context-awareness")
   mkdirSync(ledgerDirectory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
@@ -217,6 +233,7 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
     clearTimeout: (id: ReturnType<typeof setTimeout>): void => clearTimeout(id),
   }
   const clock = options.clock ?? (realClock as unknown as SchedulerClock<TimerId>)
+  const diagnostics = await DaemonDiagnostics.create(directory, () => clock.now())
   let indexSyncPending = Promise.resolve()
   const syncIndexNow = (): Promise<void> => {
     const run = indexSyncPending.then(async () => {
@@ -253,8 +270,30 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
   let clearAllActive = false
   let rotationFailed = false
   let activeSessionId: string | null = null
-  const fail = (error: unknown): void => {
+  const pendingSelections = new Map<string, { event: Observation; timer: TimerId }>()
+  const clearPendingSelections = (): void => {
+    for (const pending of pendingSelections.values()) clock.clearTimeout(pending.timer)
+    pendingSelections.clear()
+  }
+  const queueSelection = (event: Observation): void => {
+    const key = JSON.stringify([
+      event.bundleId ?? "",
+      event.windowId ?? null,
+      event.url == null ? null : normalizePageUrl(event.url),
+      event.role ?? "",
+      event.label ?? "",
+    ])
+    const previous = pendingSelections.get(key)
+    if (previous) clock.clearTimeout(previous.timer)
+    const timer = clock.setTimeout(() => {
+      pendingSelections.delete(key)
+      handleObservation(event, false)
+    }, SELECTION_BURST_MS)
+    pendingSelections.set(key, { event, timer })
+  }
+  const fail = (error: unknown, stage = "daemon"): void => {
     backgroundError = error
+    diagnostics.recordError(stage, error)
     options.onError?.(error)
     input.destroy()
   }
@@ -297,6 +336,7 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
   const acceptObservation = (event: Observation, fromCapture: boolean): string | null => {
     if (clearAllActive || reconciler?.state !== "running") {
       dwell.clear()
+      clearPendingSelections()
       return null
     }
     if (
@@ -308,11 +348,13 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
     const capture = reconciler.currentSettings.contextAwareness
     if (!capture.enabled || (capture.pausedUntil !== null && capture.pausedUntil > clock.now())) {
       dwell.clear()
+      clearPendingSelections()
       return null
     }
     if (!capture.captureTypedText && event.kind === "keyboard.text_input") return null
     if (!capture.screenOcr && event.kind === "screen.ocr") return null
     if (event.kind === "screen.ocr" && !latestHealth.screenRecordingTrusted) return null
+    if (latestHealth?.secureInput) clearPendingSelections()
     if (
       latestHealth?.secureInput &&
       (fromCapture ||
@@ -330,6 +372,7 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
       const bundleId = event.bundleId ?? ""
       if (bundleId !== "" && isDeniedApp(bundleId, capture.rules)) {
         dwell.clear()
+        clearPendingSelections()
         suppress(db, key, event, "app", bundleId)
         foregroundDenied = true
         markDeniedForeground(event)
@@ -343,6 +386,7 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
       const host = url?.hostname.toLowerCase()
       if (host && isDeniedHost(host, capture.rules)) {
         dwell.clear()
+        clearPendingSelections()
         suppress(db, key, event, "url", host)
         foregroundDenied = true
         markDeniedForeground(event)
@@ -350,6 +394,7 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
       }
       const sessionId = event.kind === "session.started" ? ulid(event.occurredAt) : activeSessionId
       const written = writeLedgerEvent(db, key, toLedgerEvent(event, sessionId))
+      diagnostics.recordCaptureSuccess()
       if (event.kind === "session.started") activeSessionId = sessionId
       if (event.kind === "session.ended") activeSessionId = null
       if (bundleId !== "") foregroundDenied = false
@@ -357,6 +402,62 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
     } finally {
       key.fill(0)
     }
+  }
+  function handleObservation(raw: unknown, deferSelection = true): void {
+    const event = ObservationSchema.parse(raw)
+    if (event.kind === "session.ended") clearPendingSelections()
+    if (event.kind === "selection.changed" && deferSelection) {
+      const capture = reconciler?.currentSettings.contextAwareness
+      const host = event.url == null ? null : URL.parse(event.url)?.hostname.toLowerCase()
+      const denied =
+        (event.bundleId != null && isDeniedApp(event.bundleId, capture?.rules ?? [])) ||
+        (host != null && isDeniedHost(host, capture?.rules ?? []))
+      if (reconciler?.state !== "running" || latestHealth?.secureInput || denied) {
+        acceptObservation(event, false)
+        return
+      }
+      queueSelection(event)
+      return
+    }
+    if (event.bundleId && BROWSER_BUNDLE_IDS.has(event.bundleId)) {
+      if (lastBrowserBundle !== event.bundleId) lastBrowserUrl = null
+      lastBrowserBundle = event.bundleId
+      if (event.url != null) lastBrowserUrl = normalizePageUrl(event.url)
+    } else if (event.bundleId) {
+      lastBrowserBundle = null
+      lastBrowserUrl = null
+    }
+    const eventId = acceptObservation(event, false)
+    if (event.kind === "session.ended") dwell.clear()
+    if (eventId === null || !scheduler || !event.bundleId) return
+    if (
+      event.kind === "session.started" ||
+      event.kind === "session.ended" ||
+      event.kind === "content.snapshot" ||
+      event.kind === "screen.ocr"
+    )
+      return
+    const identity = {
+      bundleId: event.bundleId,
+      windowId: event.windowId ?? null,
+      normalizedUrl: event.url == null ? null : normalizePageUrl(event.url),
+    }
+    const key = targetKey(identity)
+    const firstSeen = scheduler.targets.get(key) === undefined
+    const interaction =
+      event.kind.startsWith("mouse.") ||
+      event.kind.startsWith("keyboard.") ||
+      event.kind === "selection.changed"
+    const trigger = firstSeen
+      ? "discovery"
+      : interaction
+        ? "interaction"
+        : event.reason === "activation" || event.reason === "focus"
+          ? "activation"
+          : "navigation"
+    foreground = key
+    dwell.observe(key, eventId, event.occurredAt)
+    scheduler.schedule(identity, trigger)
   }
   const helper = new HelperClient({
     input,
@@ -369,52 +470,14 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
         !health.accessibilityTrusted ||
         !health.inputMonitoringTrusted ||
         health.secureInput
-      )
+      ) {
         dwell.clear()
+        clearPendingSelections()
+      }
       void reconciler?.healthChanged(health).catch(fail)
     },
-    onEvent: (raw) => {
-      const event = ObservationSchema.parse(raw)
-      if (event.bundleId && BROWSER_BUNDLE_IDS.has(event.bundleId)) {
-        if (lastBrowserBundle !== event.bundleId) lastBrowserUrl = null
-        lastBrowserBundle = event.bundleId
-        if (event.url != null) lastBrowserUrl = normalizePageUrl(event.url)
-      } else if (event.bundleId) {
-        lastBrowserBundle = null
-        lastBrowserUrl = null
-      }
-      const eventId = acceptObservation(event, false)
-      if (event.kind === "session.ended") dwell.clear()
-      if (eventId === null || !scheduler || !event.bundleId) return
-      if (
-        event.kind === "session.started" ||
-        event.kind === "session.ended" ||
-        event.kind === "content.snapshot" ||
-        event.kind === "screen.ocr"
-      )
-        return
-      const identity = {
-        bundleId: event.bundleId,
-        windowId: event.windowId ?? null,
-        normalizedUrl: event.url == null ? null : normalizePageUrl(event.url),
-      }
-      const key = targetKey(identity)
-      const firstSeen = scheduler.targets.get(key) === undefined
-      const interaction =
-        event.kind.startsWith("mouse.") ||
-        event.kind.startsWith("keyboard.") ||
-        event.kind === "selection.changed"
-      const trigger = firstSeen
-        ? "discovery"
-        : interaction
-          ? "interaction"
-          : event.reason === "activation" || event.reason === "focus"
-            ? "activation"
-            : "navigation"
-      foreground = key
-      dwell.observe(key, eventId, event.occurredAt)
-      scheduler.schedule(identity, trigger)
-    },
+    onEvent: (raw) => handleObservation(raw),
+    onProtocolError: (error) => diagnostics.recordError("helper", error),
   })
   const control = {
     start(): void {
@@ -512,7 +575,8 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
             )
               throw new AsideOutputError()
             if (
-              postUrl !== target.normalizedUrl ||
+              typeof postUrl !== "string" ||
+              normalizePageUrl(postUrl) !== target.normalizedUrl ||
               (verified?.success && verified.data.kind !== "content.snapshot") ||
               foreground !== target.key ||
               reconciler?.state !== "running" ||
@@ -592,13 +656,17 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
               scheduler.schedule(identified, "navigation")
             }
           },
-          onError: (error) => options.onError?.(error),
+          onError: (error) => {
+            diagnostics.recordError("capture", error)
+            options.onError?.(error)
+          },
         })
       }
       scheduler.start()
     },
     stop(): void {
       dwell.clear()
+      clearPendingSelections()
       scheduler?.stop()
       scheduler = null
       foreground = null
@@ -608,6 +676,7 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
     },
     pause(): void {
       dwell.clear()
+      clearPendingSelections()
       scheduler?.pause()
     },
     resume(): void {
@@ -677,11 +746,12 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
         automationUnavailable = Object.values(automation).some((granted) => !granted)
       },
       now: () => clock.now(),
+      getDiagnostics: () => diagnostics.getSnapshot(),
       mutateSettings,
     }),
     ...createSettingsHandlers({ directory, reconciler, mutateSettings }),
     ...providerHandlers,
-    ...createMcpUsageHandlers({ directory }),
+    ...createMcpUsageHandlers({ directory, now: () => clock.now() }),
     ...historyHandlers,
     clear: async (params: unknown) => {
       const request = RpcMethods.clear.input.parse(params)
@@ -964,6 +1034,7 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
     await Promise.race([running, stopped])
     if (backgroundError !== null) throw backgroundError
   } catch (error) {
+    if (backgroundError !== error) diagnostics.recordError("daemon", error)
     if (!sigterm || !(error instanceof HelperUnavailableError)) throw error
   } finally {
     closing = true
@@ -980,9 +1051,18 @@ async function runPrivateDaemon<TimerId>(options: DaemonOptions<TimerId>): Promi
     control.stop()
     await running.catch(() => {})
     await Promise.resolve(summaryPass).catch(() => {})
+    await indexSyncPending
+    await diagnostics.flush()
     await embeddingManager.close()
-    indexState.db?.close()
-    db.exec("PRAGMA wal_checkpoint(TRUNCATE)")
-    db.close()
+    try {
+      if (indexState.db) truncateWal(indexState.db)
+    } finally {
+      indexState.db?.close()
+      try {
+        truncateWal(db)
+      } finally {
+        db.close()
+      }
+    }
   }
 }

@@ -12,18 +12,48 @@ import {
   RECALL_CANDIDATE_LIMIT,
   WEBKIT_EPOCH_OFFSET_MS,
 } from "../constants"
-import { type DenyRule, isDeniedHost } from "../policy/index"
+import { type DenyRule, isDeniedApp, isDeniedHost } from "../policy/index"
 import { normalizePageUrl } from "../policy/url"
 import { redact } from "../redact/index"
 import type { BrowserHistoryEntry } from "./search"
 
 const browserRoots = [
-  { browser: "chrome", app: "Chrome", parts: ["Google", "Chrome"] },
-  { browser: "arc", app: "Arc", parts: ["Arc", "User Data"] },
-  { browser: "brave", app: "Brave", parts: ["BraveSoftware", "Brave-Browser"] },
-  { browser: "edge", app: "Microsoft Edge", parts: ["Microsoft Edge"] },
-  { browser: "aside", app: "Aside", parts: ["Aside"] },
-  { browser: "aside", app: "Aside", parts: ["Aside", "User Data"] },
+  {
+    browser: "chrome",
+    app: "Chrome",
+    bundleId: "com.google.Chrome",
+    parts: ["Google", "Chrome"],
+  },
+  {
+    browser: "arc",
+    app: "Arc",
+    bundleId: "company.thebrowser.Browser",
+    parts: ["Arc", "User Data"],
+  },
+  {
+    browser: "brave",
+    app: "Brave",
+    bundleId: "com.brave.Browser",
+    parts: ["BraveSoftware", "Brave-Browser"],
+  },
+  {
+    browser: "edge",
+    app: "Microsoft Edge",
+    bundleId: "com.microsoft.edgemac",
+    parts: ["Microsoft Edge"],
+  },
+  {
+    browser: "aside",
+    app: "Aside",
+    bundleId: "at.studio.AsideBrowser",
+    parts: ["Aside"],
+  },
+  {
+    browser: "aside",
+    app: "Aside",
+    bundleId: "at.studio.AsideBrowser",
+    parts: ["Aside", "User Data"],
+  },
 ] as const
 
 const visitSchema = z.strictObject({
@@ -42,6 +72,7 @@ export type BrowserHistoryOptions = {
   readonly settings: {
     readonly rules: readonly DenyRule[]
     readonly retentionDays: number
+    readonly browserHistoryEnabled: boolean
   }
   readonly now?: () => number
 }
@@ -81,6 +112,7 @@ function profiles(options: BrowserHistoryOptions): readonly Profile[] {
   if (!isDirectory(options.applicationSupportPath)) return []
   const found: Profile[] = []
   for (const root of browserRoots) {
+    if (isDeniedApp(root.bundleId, options.settings.rules)) continue
     let parent = options.applicationSupportPath
     for (const part of root.parts) {
       parent = join(parent, part)
@@ -169,10 +201,11 @@ function readProfile(
         const parsed = visitSchema.safeParse(raw)
         if (!parsed.success) return []
         const row = parsed.data
-        const url = normalizePageUrl(row.url)
-        if (url === null) return []
-        const domain = new URL(url).hostname.toLowerCase()
+        const normalizedUrl = normalizePageUrl(row.url)
+        if (normalizedUrl === null) return []
+        const domain = new URL(normalizedUrl).hostname.toLowerCase()
         if (isDeniedHost(domain, options.settings.rules)) return []
+        const url = redact(normalizedUrl).text
         return [
           {
             browser: profile.browser,
@@ -197,7 +230,7 @@ export function createBrowserHistoryProvider(
   options: BrowserHistoryOptions,
 ): (request: BrowserHistoryRequest) => Promise<readonly BrowserHistoryEntry[]> {
   return async (request) => {
-    if (request.terms.length === 0) return []
+    if (!options.settings.browserHistoryEnabled || request.terms.length === 0) return []
     const rows: BrowserHistoryEntry[] = []
     for (const profile of profiles(options)) {
       try {

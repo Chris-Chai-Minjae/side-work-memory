@@ -48,6 +48,19 @@ describe("v2 deny rules", () => {
     },
   )
 
+  test.each([
+    ["MAIL.EXAMPLE.COM.", "mail.example.com"],
+    ["mail.example.com", "MAIL.EXAMPLE.COM."],
+    ["a.mail.example.com.", "mail.example.com."],
+  ] as const)(
+    "Given DNS-equivalent host %s and rule %s, when checked, then trailing dots and case are canonicalized",
+    (host, urlDomain) => {
+      expect(isDeniedHostV2(host, [{ scope: "url", behavior: "do_not_observe", urlDomain }])).toBe(
+        true,
+      )
+    },
+  )
+
   test("Given only an observe URL rule, when checking its host, then it is not denied", () => {
     const rules = [{ scope: "url", behavior: "observe", urlDomain: "mail.example.com" }] as const
     expect(isDeniedHostV2("mail.example.com", rules)).toBe(false)

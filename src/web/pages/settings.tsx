@@ -127,7 +127,7 @@ function tenMinuteSummaries(value: unknown): Summary[] {
 function normalizeDomain(value: string): string | null {
   try {
     const url = new URL(value.includes("://") ? value : `https://${value}`)
-    const domain = url.hostname.toLowerCase()
+    const domain = url.hostname.toLowerCase().replace(/\.$/u, "")
     return /^[A-Za-z0-9.-]+$/.test(domain) ? domain : null
   } catch (error) {
     if (error instanceof TypeError) return null
@@ -202,6 +202,7 @@ function demoClient(state: SettingsDemoState): RpcClient {
           capture_typed_text: true,
           screen_ocr: false,
           aside_adapter: true,
+          browser_history_enabled: false,
           retention_days: 14,
           rules,
           summary_model: null,
@@ -857,6 +858,30 @@ export function SettingsPage({
             class="setting-switch"
             disabled={busy}
             onClick={() => void update({ asideAdapter: !settings.aside_adapter })}
+          >
+            <span />
+          </button>
+        </div>
+        <div class="setting-row">
+          <div>
+            <strong>{t(language, "Include browser history in recall")}</strong>
+            <p class="settings-copy">
+              {t(
+                language,
+                "Off by default. When enabled, agents can search supported browser history. Side redacts sensitive data and respects your denylist.",
+              )}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-label={t(language, "Include browser history in recall")}
+            aria-checked={settings.browser_history_enabled}
+            class="setting-switch"
+            disabled={busy}
+            onClick={() =>
+              void update({ browserHistoryEnabled: !settings.browser_history_enabled })
+            }
           >
             <span />
           </button>

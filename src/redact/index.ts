@@ -111,7 +111,12 @@ export function redact(text: string): RedactionResult {
   )
   const selected: Match[] = []
   for (const match of matches) {
-    if (match.start >= (selected.at(-1)?.end ?? 0)) selected.push(match)
+    const previous = selected.at(-1)
+    if (!previous || match.start >= previous.end) {
+      selected.push(match)
+    } else if (match.end > previous.end) {
+      selected[selected.length - 1] = { ...previous, end: match.end }
+    }
   }
 
   const chunks: string[] = []

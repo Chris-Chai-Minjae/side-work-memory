@@ -36,6 +36,10 @@ const directory = mkdtempSync(join(tmpdir(), "side-p5-bundle-smoke-"))
 const child = spawn(binary, ["daemon"], {
   env: { ...process.env, SIDE_DATA_DIR: directory, LCA_DATA_DIR: directory },
   stdio: ["pipe", "pipe", "pipe"],
+  detached: true,
+})
+const exited = new Promise<number | null>((resolveExit) => {
+  child.once("exit", resolveExit)
 })
 const sessionState: { current: z.infer<typeof WebSession> | null } = { current: null }
 let stderr = ""
@@ -116,10 +120,23 @@ try {
     throw new Error(`Compiled memory search failed: ${JSON.stringify(result)}`)
   console.log("PASS bundled web, SQLite vec0, and compiled MiniLM inference")
 } finally {
-  if (child.exitCode === null) {
-    child.kill("SIGTERM")
-    await new Promise<void>((resolveExit) => child.once("exit", () => resolveExit()))
+  try {
+    if (child.exitCode === null) {
+      const pid = child.pid
+      try {
+        if (pid) process.kill(-pid, "SIGTERM")
+        else child.kill("SIGTERM")
+      } catch {
+        child.kill("SIGTERM")
+      }
+      await exited
+    }
+  } finally {
+    lines.close()
+    child.stdin.destroy()
+    child.stdout.destroy()
+    child.stderr.destroy()
+    Bun.gc(true)
+    rmSync(directory, { recursive: true, force: true })
   }
-  lines.close()
-  rmSync(directory, { recursive: true, force: true })
 }

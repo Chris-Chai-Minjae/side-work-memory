@@ -3,7 +3,7 @@ import { createHash } from "node:crypto"
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { type Browser, chromium, type Page } from "playwright"
+import { type Browser, type BrowserContext, chromium, type Page } from "playwright"
 import { z } from "zod"
 import { SettingsResourceSchema } from "../../src/contracts/rpc-resources"
 import { SettingsSchema } from "../../src/contracts/settings"
@@ -14,80 +14,87 @@ const RpcRequestSchema = z.object({ method: z.string(), params: z.unknown().opti
 let browser: Browser
 let webDirectory: string
 
-beforeAll(() => {
-  webDirectory = mkdtempSync(join(tmpdir(), "side-settings-web-"))
-  const built = Bun.spawnSync({
-    cmd: [
-      process.execPath,
-      "build",
-      "./src/web/index.html",
-      "--target",
-      "browser",
-      "--minify",
-      "--outdir",
-      webDirectory,
-    ],
-    cwd: join(import.meta.dir, "..", ".."),
-  })
-  if (built.exitCode !== 0) throw new Error(built.stderr.toString())
-})
-
 beforeAll(async () => {
-  browser = await chromium.launch({ channel: "chrome", headless: true })
+  webDirectory = mkdtempSync(join(tmpdir(), "side-settings-web-"))
+  try {
+    const built = Bun.spawnSync({
+      cmd: [
+        process.execPath,
+        "build",
+        "./src/web/index.html",
+        "--target",
+        "browser",
+        "--minify",
+        "--outdir",
+        webDirectory,
+      ],
+      cwd: join(import.meta.dir, "..", ".."),
+    })
+    if (built.exitCode !== 0) throw new Error(built.stderr.toString())
+    browser = await chromium.launch({ channel: "chrome", headless: true })
+  } catch (error) {
+    rmSync(webDirectory, { recursive: true, force: true })
+    throw error
+  }
 })
 
 afterAll(async () => {
-  await browser?.close()
-  Bun.gc(true)
-  if (webDirectory) rmSync(webDirectory, { recursive: true, force: true })
-})
+  try {
+    await browser?.close()
+  } finally {
+    Bun.gc(true)
+    if (webDirectory) rmSync(webDirectory, { recursive: true, force: true })
+  }
+}, 30_000)
 
 async function withPage(
   run: (page: Page, fixture: Fixture) => Promise<void>,
   inputMonitoring = true,
 ) {
   const fixture = await startSettingsFixture(webDirectory, inputMonitoring)
-  expect(fixture.daemonPort).toBeGreaterThan(0)
-  expect(fixture.port).toBe(fixture.daemonPort)
-  expect(existsSync(fixture.relayPath)).toBe(false)
-  expect(JSON.parse(readFileSync(fixture.webPublicationPath, "utf8"))).toEqual({
-    port: fixture.port,
-    tokenHash: fixture.tokenHash,
-  })
-  expect(readFileSync(fixture.webPublicationPath, "utf8")).not.toContain(fixture.token)
-  const context = await browser.newContext()
-  const page = await context.newPage()
-  const scriptRequests: string[] = []
-  const errors: string[] = []
-  const rpcRequests: { readonly url: string; readonly authorization: string | undefined }[] = []
-  const navigations: { readonly url: string; readonly authorization: string }[] = []
-  page.on("request", (request) => {
-    if (request.resourceType() === "script") scriptRequests.push(request.url())
-    if (new URL(request.url()).pathname === "/rpc") {
-      rpcRequests.push({ url: request.url(), authorization: request.headers()["authorization"] })
-      const { method, params } = RpcRequestSchema.parse(request.postDataJSON())
-      fixture.calls.push({
-        method,
-        params:
-          method === "providers.setKey"
-            ? { providerId: z.object({ providerId: z.string() }).parse(params).providerId }
-            : params,
-      })
-    }
-  })
-  page.on("pageerror", (error) => errors.push(error.message))
-  await page.route("**/*", async (route) => {
-    if (route.request().isNavigationRequest()) {
-      const authorization = `Bearer ${fixture.token}`
-      navigations.push({ url: route.request().url(), authorization })
-      await route.continue({
-        headers: { ...route.request().headers(), authorization },
-      })
-    } else {
-      await route.continue()
-    }
-  })
+  let context: BrowserContext | null = null
+  let page: Page | null = null
   try {
+    expect(fixture.daemonPort).toBeGreaterThan(0)
+    expect(fixture.port).toBe(fixture.daemonPort)
+    expect(existsSync(fixture.relayPath)).toBe(false)
+    expect(JSON.parse(readFileSync(fixture.webPublicationPath, "utf8"))).toEqual({
+      port: fixture.port,
+      tokenHash: fixture.tokenHash,
+    })
+    expect(readFileSync(fixture.webPublicationPath, "utf8")).not.toContain(fixture.token)
+    context = await browser.newContext()
+    page = await context.newPage()
+    const scriptRequests: string[] = []
+    const errors: string[] = []
+    const rpcRequests: { readonly url: string; readonly authorization: string | undefined }[] = []
+    const navigations: { readonly url: string; readonly authorization: string }[] = []
+    page.on("request", (request) => {
+      if (request.resourceType() === "script") scriptRequests.push(request.url())
+      if (new URL(request.url()).pathname === "/rpc") {
+        rpcRequests.push({ url: request.url(), authorization: request.headers()["authorization"] })
+        const { method, params } = RpcRequestSchema.parse(request.postDataJSON())
+        fixture.calls.push({
+          method,
+          params:
+            method === "providers.setKey"
+              ? { providerId: z.object({ providerId: z.string() }).parse(params).providerId }
+              : params,
+        })
+      }
+    })
+    page.on("pageerror", (error) => errors.push(error.message))
+    await page.route("**/*", async (route) => {
+      if (route.request().isNavigationRequest()) {
+        const authorization = `Bearer ${fixture.token}`
+        navigations.push({ url: route.request().url(), authorization })
+        await route.continue({
+          headers: { ...route.request().headers(), authorization },
+        })
+      } else {
+        await route.continue()
+      }
+    })
     const initialUrl = `http://127.0.0.1:${fixture.port}/?t=${fixture.token}#/settings/context-awareness`
     await page.goto(initialUrl, { waitUntil: "domcontentloaded" })
     await page.getByRole("heading", { name: "Side가 하루를 기억하도록" }).waitFor()
@@ -107,8 +114,15 @@ async function withPage(
     expect(existsSync(fixture.relayPath)).toBe(false)
     expect(errors).toEqual([])
   } finally {
-    await context.close()
-    await fixture.close()
+    try {
+      await page?.close()
+    } finally {
+      try {
+        await context?.close()
+      } finally {
+        await fixture.close()
+      }
+    }
   }
 }
 

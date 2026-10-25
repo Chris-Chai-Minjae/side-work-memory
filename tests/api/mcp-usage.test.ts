@@ -38,7 +38,7 @@ test("Given three MCP calls from two clients, usage groups tool counts and avera
     `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
   )
   try {
-    const handlers = createMcpUsageHandlers({ directory })
+    const handlers = createMcpUsageHandlers({ directory, now: () => now })
     expect(await handlers["mcp.usage"]({ sinceMs: now - 86_400_000 })).toEqual([
       { client_name: "Aside", calls: { memory_search: 1 }, avg_latency_ms: 90 },
       {

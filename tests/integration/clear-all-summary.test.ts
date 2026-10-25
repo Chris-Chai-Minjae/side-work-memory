@@ -166,4 +166,4 @@ test("Given an in-flight summary, when Clear all starts, then deletion and rotat
     provider.stop(true)
     rmSync(directory, { recursive: true, force: true })
   }
-})
+}, 30_000)

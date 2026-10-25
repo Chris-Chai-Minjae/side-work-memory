@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "version": "3.53.4",
+  "requiredCompileOptions": ["ENABLE_FTS5"],
+  "knownBinaries": {
+    "darwin-arm64": {
+      "sha256": "75feed7151d3e496343ffee9c25960d85188ed99b2ffb1051fe016f912c6c808",
+      "source": "Homebrew sqlite 3.53.4"
+    }
+  }
+}

@@ -49,7 +49,7 @@ open /Applications/Side.app
 1. Side는 Dock이 아니라 **메뉴바**에 나타납니다.
 2. 첫 실행 온보딩에서 캡처 권한을 허용하고 컨텍스트 인지를 켭니다.
 3. 요약 모델 설정은 건너뛸 수 있습니다. 이 경우 캡처와 검색은 동작하고 요약만 대기합니다.
-4. 메뉴바 **설정**에서 관리하는 항목: 보관 기간, 제외 앱·웹사이트(Denylist), 요약 모델과 제공자, 에이전트 연결, 화면 언어(한국어 / English).
+4. 메뉴바 **설정**에서 관리하는 항목: 보관 기간, 제외 앱·웹사이트(Denylist), 브라우저 방문 기록 검색(기본 꺼짐), 요약 모델과 제공자, 에이전트 연결, 화면 언어(한국어 / English).
 
 ## 4. macOS 권한
 
@@ -66,6 +66,8 @@ open /Applications/Side.app
 
 **브라우저 자동화**는 Side가 지원 브라우저에 현재 탭 URL을 물을 때 쓰는 macOS 권한입니다. 브라우저마다 따로 허용되며, 이미 허용된 브라우저에는 다시 요청해도 승인 창이 뜨지 않습니다. Side에서 **허용됨**이라고 표시되면 추가 조치가 필요 없습니다. 상태를 바꾸려면 **시스템 설정 → 개인정보 보호 및 보안 → 자동화**를 여세요([Apple 안내](https://support.apple.com/ko-kr/guide/mac-help/mchl108e1718/mac)).
 
+Safari는 시크릿 창 상태를 확실히 구분할 수 없어 현재 활성 창 캡처를 실패 시 차단(fail-closed)합니다. 브라우저 자체 방문 기록 조회는 별도 옵트인 설정을 켠 경우에만 수행합니다.
+
 **Keychain 권한 허용**은 Side 설정에 저장한 API 제공자의 키를 읽을 수 있는지 확인합니다. **키 참조 설정됨**은 항목이 등록됐다는 뜻이고, **Keychain 접근 확인 전**은 값을 읽는 검사를 아직 하지 않았다는 뜻입니다. Keychain 창이 뜨면 Side의 접근을 선택할 수 있습니다. 이미 허용된 경우 새 창 없이 확인이 끝날 수 있습니다. Side 원본 기록을 여는 데 필요한 암호화 키(`local-context-awareness-ledger`)는 제공자 API 키와 별개입니다. Codex·Claude Code CLI 로그인에도 이 버튼을 사용하지 않습니다([Apple 안내](https://support.apple.com/ko-kr/guide/mac-help/kychn002/mac)).
 
 ## 5. 진단과 문제 해결
@@ -77,7 +79,7 @@ open /Applications/Side.app
 "/Applications/Side.app/Contents/Resources/side" status    # 데몬 상태
 ```
 
-`doctor`의 제공자 연결 검사는 실제 활동 대신 합성 문장을 사용합니다.
+`doctor`의 제공자 연결 검사는 실제 활동 대신 합성 문장을 사용합니다. `status --json`과 `doctor`의 daemon diagnostics에는 마지막 오류의 이름·코드·단계·시각·연속 횟수와 마지막 성공 캡처 시각이 표시됩니다. 오류 message, 캡처 내용, URL, 키, stderr 원문은 진단 로그에 기록하지 않습니다.
 
 제공자 줄에서 `PASS`는 선택한 요약 제공자의 합성 연결 검사 성공, `SKIP`은 요약 제공자가 없거나 선택하지 않은 제공자에 모델 ID·API 키가 없어 검사를 생략한 상태, `WARN`은 선택하지 않은 제공자의 합성 연결 검사 실패를 뜻합니다. 선택한 제공자의 검사 실패는 `FAIL`입니다.
 
@@ -120,10 +122,14 @@ open /Applications/Side.app
 | `context-awareness/ledger.db` | 원본 이벤트 (제목·URL·본문 등) |
 | `memory/episodic/` | 날짜별 요약 페이지 |
 | `index.db` | 검색 색인 |
+| `run/mcp-usage.jsonl*` | MCP 클라이언트·도구·결과 수·지연 시간만 기록하는 사용량 로그 |
+| `run/diagnostics.jsonl*` | 민감 내용을 제외한 daemon 진단 메타데이터 |
+| `daemon.lock` | 실행 중인 daemon의 단일 소유자 확인. 종료 후 남은 stale lock은 다음 시작 때 회수 |
 
 - 원본의 제목·URL·본문 등 민감한 컬럼은 저장 전에 알려진 패턴으로 마스킹하고 AES-256-GCM으로 암호화합니다. 규칙 기반 마스킹은 모든 민감 정보를 찾는다는 보장이 없습니다.
 - 마스터 키와 provider API 키는 macOS Keychain에 보관합니다(`local-context-awareness-ledger`, `side-provider-api-key`).
 - 원본 캡처의 기본 보관 기간은 14일이며 설정에서 1·3·7·14·30일 중 고를 수 있습니다. 요약은 별도로 남습니다.
+- MCP 사용량 로그는 파일당 1MiB·최대 5개, 진단 로그는 파일당 256KiB·최대 3개로 회전하며 둘 다 30일 후 삭제되고 0600 권한을 유지합니다. 이 운영 로그의 30일 보존은 원본 캡처 보관 기간 설정과 독립적입니다.
 - 날짜별 페이지(인용된 제목·주소 포함)와 검색 색인(`index.db`)은 암호화되지 않은 로컬 파생 파일입니다. 원본 보관 기간이 지나도 요약·색인에 내용이 남을 수 있으며, 전체 삭제로 제거합니다.
 - Side는 원본 캡처를 클라우드로 동기화하지 않습니다.
 
@@ -146,7 +152,7 @@ open /Applications/Side.app
 
 - `clear all`은 대화형 확인 후 Side 이벤트·요약·날짜 페이지·검색 색인을 지우고 마스터 키를 교체합니다. `--yes`를 붙이면 대화형 확인을 건너뜁니다.
 - 이 명령은 브라우저 자체의 방문 기록을 지우지 않습니다.
-- 설정과 provider Keychain 항목은 이 이력 삭제와 별개입니다.
+- 설정과 provider Keychain 항목은 이 이력 삭제와 별개입니다. MCP 사용량·진단 로그도 활동 이력이 아닌 운영 메타데이터이므로 `clear all`로 지우지 않으며 각 로그의 30일 보존·회전 규칙을 따릅니다.
 
 ### 완전히 제거하기
 

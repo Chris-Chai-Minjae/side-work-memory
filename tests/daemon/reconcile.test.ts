@@ -19,6 +19,7 @@ import {
   FRAME_COLD_AGE_MS,
   GLANCE_MS,
   MS_PER_DAY,
+  SELECTION_BURST_MS,
   SWEEP_INTERVAL_MS,
   SYNC_DEBOUNCE_MS,
   TEN_MINUTES_MS,
@@ -540,6 +541,123 @@ test("Given helper session boundaries, when events and a capture are stored, the
   }
 })
 
+test("Given selection bursts, when fake time advances, then each target and field keeps only its latest event after two seconds", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "side-selection-debounce-test-"))
+  const clock = new FakeClock(Date.now())
+  await saveSettings(
+    directory,
+    SettingsSchema.parse({ version: 2, contextAwareness: { enabled: true } }),
+  )
+  const helper = await launchFakeHelper(directory, { clock })
+  const db = openLedger(join(directory, "context-awareness", "ledger.db"))
+  const event = (text: string, label = "Editor") => ({
+    kind: "selection.changed",
+    source: "mac_ax",
+    occurredAt: clock.now(),
+    bundleId: "invalid.fixture.editor",
+    windowId: 7,
+    role: "AXTextArea",
+    label,
+    text,
+  })
+  const rows = () =>
+    db
+      .query<{ id: string; blob_id: string }, []>(
+        "SELECT id, blob_id FROM context_awareness_events WHERE kind = 'selection.changed' ORDER BY rowid",
+      )
+      .all()
+  try {
+    helper.send(event("first"))
+    await Bun.sleep(10)
+    clock.advanceBy(SELECTION_BURST_MS / 2)
+    helper.send(event("latest"))
+    await Bun.sleep(10)
+    clock.advanceBy(SELECTION_BURST_MS / 2)
+    helper.send(event("other field", "Other editor"))
+    await Bun.sleep(10)
+    expect(rows()).toHaveLength(0)
+    clock.advanceBy(SELECTION_BURST_MS / 2)
+    await waitFor(() => rows().length === 1)
+    clock.advanceBy(SELECTION_BURST_MS / 2)
+    await waitFor(() => rows().length === 2)
+    const contents = rows().map((row) => readBlobContent(db, Buffer.alloc(32, 7), row.blob_id))
+    expect(contents).toEqual(["latest", "other field"])
+  } finally {
+    db.close()
+    await helper.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})
+
+test.each(["pause", "stop", "denylist", "secure input", "session ended"] as const)(
+  "Given a pending selection, when capture is discarded by %s, then the timer never persists it",
+  async (scenario) => {
+    const directory = mkdtempSync(join(tmpdir(), "side-selection-discard-test-"))
+    const clock = new FakeClock(Date.now())
+    await saveSettings(
+      directory,
+      SettingsSchema.parse({
+        version: 2,
+        contextAwareness: {
+          enabled: true,
+          rules: [{ scope: "app", behavior: "do_not_observe", bundleId: "invalid.fixture.denied" }],
+        },
+      }),
+    )
+    const helper = await launchFakeHelper(directory, { clock })
+    const db = openLedger(join(directory, "context-awareness", "ledger.db"))
+    const event = {
+      kind: "selection.changed",
+      source: "mac_ax",
+      occurredAt: clock.now(),
+      bundleId: "invalid.fixture.editor",
+      windowId: 7,
+      role: "AXTextArea",
+      label: "Editor",
+      text: "must be discarded",
+    }
+    try {
+      helper.send(event)
+      await Bun.sleep(10)
+      if (scenario === "secure input") {
+        helper.input.write(
+          `${JSON.stringify({ type: "health", health: { ...health, secureInput: true } })}\n`,
+        )
+      } else if (scenario === "denylist") {
+        helper.send({ ...event, bundleId: "invalid.fixture.denied" })
+      } else if (scenario === "session ended") {
+        helper.send({ kind: "session.ended", source: "mac_ax", occurredAt: clock.now() })
+      } else {
+        const response = await fetch("http://localhost/rpc", {
+          unix: join(directory, "run", "daemon.sock"),
+          method: "POST",
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: scenario === "pause" ? "pause" : "settings.patch",
+            params: scenario === "pause" ? { durationMs: 900_000 } : { enabled: false },
+          }),
+        })
+        expect((await response.json()).error).toBeUndefined()
+      }
+      await Bun.sleep(10)
+      clock.advanceBy(SELECTION_BURST_MS)
+      await Bun.sleep(10)
+      expect(
+        db
+          .query<{ count: number }, []>(
+            "SELECT COUNT(*) AS count FROM context_awareness_events WHERE kind = 'selection.changed'",
+          )
+          .get()?.count,
+      ).toBe(0)
+    } finally {
+      db.close()
+      await helper.close()
+      rmSync(directory, { recursive: true, force: true })
+    }
+  },
+)
+
 test.each(["readable AX", "empty AX"])(
   "Given opted-in Aside foreground with %s, when native URL and tab identity stay stable, then the ARIA snapshot reaches the ledger",
   async (axState) => {
@@ -568,7 +686,7 @@ test.each(["readable AX", "empty AX"])(
       asideAdapter,
       browserUrl: () => {
         preflightSeen = true
-        return url
+        return rawUrl
       },
     })
     try {

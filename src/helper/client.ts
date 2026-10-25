@@ -282,6 +282,9 @@ export class HelperClient {
         this.masterKey = Buffer.from(message.key, "base64")
         for (const waiter of this.helloWaiters.splice(0)) waiter.resolve()
         return
+      case "ping":
+        await this.options.output.write(`${JSON.stringify({ type: "pong", id: message.id })}\n`)
+        return
       case "health":
         this.health.update(message.health)
         await this.options.onHealth?.(message.health)

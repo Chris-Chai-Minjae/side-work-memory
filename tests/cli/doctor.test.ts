@@ -145,6 +145,41 @@ test("Given a selected provider whose synthetic probe fails, when checked, then 
   expect(lines.join("\n")).not.toContain("synthetic-secret-should-not-appear")
 })
 
+test("Given daemon diagnostics, doctor prints only operational metadata and the last capture time", async () => {
+  const lines: string[] = []
+  await runDoctor({
+    write: (line) => lines.push(line),
+    checkCustomSqlite: () => true,
+    checkVec0: () => true,
+    checkModelCache: () => true,
+    async rpc(method) {
+      if (method === "status")
+        return {
+          health: { pid: 10 },
+          stop_reason: null,
+          diagnostics: {
+            last_error: {
+              name: "TypeError",
+              code: "E_CAPTURE",
+              stage: "capture",
+              timestamp: 1_000,
+              consecutive_count: 2,
+            },
+            last_successful_capture_at: 900,
+          },
+        }
+      if (method === "permissions")
+        return { accessibility: true, input_monitoring: true, screen_recording: true }
+      if (method === "settings.get") return { screen_ocr: false, providers: [] }
+      throw new TypeError(`Unexpected ${method}`)
+    },
+  })
+  expect(lines.join("\n")).toContain("WARN daemon diagnostics")
+  expect(lines.join("\n")).toContain("TypeError/E_CAPTURE")
+  expect(lines.join("\n")).toContain("consecutive 2")
+  expect(lines.join("\n")).toContain("1970-01-01T00:00:00.900Z")
+})
+
 test("Given missing required TCC permissions, doctor fails without requesting them", async () => {
   const lines: string[] = []
   const calls: string[] = []

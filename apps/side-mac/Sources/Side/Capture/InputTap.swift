@@ -11,6 +11,8 @@ final class InputTap {
     private var source: CFRunLoopSource?
     private var dragStart: CGPoint?
     private var dragReported = false
+    private var retryTask: Task<Void, Never>?
+    private var retryAttempt = 0
 
     init(stream: CaptureStream, observerHub: AXObserverHub? = nil) {
         self.stream = stream
@@ -24,13 +26,19 @@ final class InputTap {
     @discardableResult
     func start() -> Bool {
         guard tap == nil else { return true }
+        retryTask?.cancel()
+        retryTask = nil
         let types: [CGEventType] = [.keyDown, .leftMouseDown, .leftMouseUp, .rightMouseDown, .leftMouseDragged]
         let mask = types.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
         guard let newTap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly,
             eventsOfInterest: mask, callback: Self.callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ), let newSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, newTap, 0) else { return false }
+        ), let newSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, newTap, 0) else {
+            scheduleRetry()
+            return false
+        }
+        retryAttempt = 0
         tap = newTap
         source = newSource
         CFRunLoopAddSource(CFRunLoopGetMain(), newSource, .commonModes)
@@ -38,7 +46,21 @@ final class InputTap {
         return true
     }
 
+    private func scheduleRetry() {
+        guard retryTask == nil else { return }
+        retryAttempt += 1
+        let delay = min(pow(2.0, Double(retryAttempt - 1)), 30.0)
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
+            await MainActor.run { _ = self.start() }
+        }
+    }
+
     func stop() {
+        retryTask?.cancel()
+        retryTask = nil
+        retryAttempt = 0
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         if let tap {
             CGEvent.tapEnable(tap: tap, enable: false)

@@ -28,14 +28,18 @@ describe("NFR sample math", () => {
   })
 })
 
-test("synthetic storage benchmark uses the ledger and day-page renderer", async () => {
+test("synthetic storage benchmark includes every long-lived data-root file", async () => {
   const { measureEightHourDisk } = await import("../../scripts/bench/disk")
   const result = await measureEightHourDisk()
   expect(result.events).toBe(96)
   expect(result.summaries).toBe(48)
   expect(result.sealedBlobs).toBe(96)
-  expect(result.totalBytes).toBe(result.ledgerBytes + result.dayPageBytes)
+  expect(result.totalBytes).toBe(
+    result.ledgerBytes + result.dayPageBytes + result.indexBytes + result.operationalBytes,
+  )
   expect(result.dayPageBytes).toBeGreaterThan(0)
+  expect(result.indexBytes).toBeGreaterThan(0)
+  expect(result.operationalBytes).toBeGreaterThan(0)
 })
 
 test("capture proxy waits for committed ledger rows", async () => {

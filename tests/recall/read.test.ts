@@ -163,6 +163,7 @@ describe("history read", () => {
       expect(result?.text).toContain("Synthetic description")
       expect(result?.text.includes("Synthetic summary body")).toBe(true)
       expect(result?.text.includes(source)).toBe(true)
+      expect(result?.text).not.toContain("Synthetic citation")
       expect(EvidenceSchema.safeParse(result).success).toBe(true)
       expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(READ_CALL_BYTES)
       assertBoundary(result?.text ?? "")
@@ -297,9 +298,11 @@ describe("history read", () => {
 
       // When invalid and absent references are read.
       const absent = historyRead({ db, masterKey }, { id: missing })
+      const absentEvent = historyRead({ db, masterKey }, { id: `e:${ulid(now)}` })
 
-      // Then bad refs and context limits are rejected, while missing summaries return null.
+      // Then bad refs and context limits are rejected, while missing references return null.
       expect(absent).toBeNull()
+      expect(absentEvent).toBeNull()
       expect(() => historyRead({ db, masterKey }, { id: "e:bad" })).toThrow(HistoryReadInputError)
       expect(() => historyRead({ db, masterKey }, { id: `e:${"Z".repeat(26)}` })).toThrow(
         HistoryReadInputError,

@@ -12,9 +12,11 @@ import {
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { z } from "zod"
+import { createHistoryHandlers } from "../../src/api/resources/history"
 import { EMBEDDING_DIMENSIONS, SYNC_DEBOUNCE_MS } from "../../src/constants"
 import { clearLedger } from "../../src/ledger/delete"
 import { openLedger } from "../../src/ledger/schema"
+import { LedgerStats } from "../../src/ledger/stats"
 import { openIndexDb } from "../../src/memory/index-db"
 import { createMemoryIndexSyncScheduler, syncMemoryIndex } from "../../src/memory/sync"
 import { FakeClock } from "../mocks/fake-clock"
@@ -218,6 +220,104 @@ test("Given clear after embedding, when committing, then stale index and manifes
       indexDb.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM chunks").get()?.count,
     ).toBe(0)
     expect(() => readFileSync(join(root, "memory", "memory-index.json"))).toThrow()
+  } finally {
+    indexDb.close()
+    ledgerDb.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("Given a reader holding the index WAL, deleted-page sync reports the checkpoint failure", async () => {
+  const root = mkdtempSync(join(tmpdir(), "side-sync-checkpoint-busy-"))
+  const ledgerDb = openLedger(join(root, "ledger.db"))
+  const indexDb = openIndexDb(join(root, "index.db"))
+  const reader = openIndexDb(join(root, "index.db"))
+  try {
+    const removed = page(root, "2026-09-23", "Synthetic checkpoint content")
+    await syncMemoryIndex({
+      ledgerDb,
+      indexDb,
+      dataDir: root,
+      embedder: { embed: async () => vector() },
+    })
+    reader.exec("BEGIN")
+    reader.query("SELECT COUNT(*) FROM chunks").get()
+    rmSync(removed)
+
+    await expect(
+      syncMemoryIndex({
+        ledgerDb,
+        indexDb,
+        dataDir: root,
+        embedder: { embed: async () => vector() },
+      }),
+    ).rejects.toThrow("WAL checkpoint")
+    expect(indexDb.query("SELECT id FROM chunks").all()).toEqual([])
+  } finally {
+    reader.close()
+    indexDb.close()
+    ledgerDb.close()
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test("Given plaintext summary and index canaries, clear leaves none in the ledger, WAL, or index", async () => {
+  const root = mkdtempSync(join(tmpdir(), "side-clear-canary-"))
+  const ledgerDb = openLedger(join(root, "ledger.db"))
+  const indexDb = openIndexDb(join(root, "index.db"))
+  const canary = "synthetic-clear-canary-8f42c71a"
+  const now = new Date(2026, 8, 24, 12).getTime()
+  const sync = () =>
+    syncMemoryIndex({
+      ledgerDb,
+      indexDb,
+      dataDir: root,
+      embedder: { embed: async () => vector() },
+    })
+  try {
+    page(root, "2026-09-24", canary)
+    ledgerDb
+      .query(`
+      INSERT INTO context_awareness_summaries
+        (id, kind, window_from, window_to, created_at, updated_at, title, description, body, status)
+      VALUES ('canary-summary', '10min', ?, ?, ?, ?, ?, ?, ?, 'done')
+    `)
+      .run(now - 600_000, now, now, now, canary, canary, canary)
+    await sync()
+    expect(
+      indexDb
+        .query<{ count: number }, [string]>(
+          "SELECT COUNT(*) AS count FROM chunks WHERE instr(text, ?) > 0",
+        )
+        .get(canary)?.count,
+    ).toBe(1)
+    const handlers = createHistoryHandlers({
+      db: ledgerDb,
+      directory: root,
+      stats: new LedgerStats(ledgerDb, root),
+      now: () => now,
+      getMasterKey: () => Buffer.alloc(32, 7),
+      rotateKey: () => {},
+      afterClear: async () => {
+        await sync()
+      },
+      getRetentionDays: () => 14,
+      onSummariesRetried: () => {},
+    })
+
+    await handlers.clear({ target: "all" })
+
+    const dayPage = join(root, "memory", "episodic", "context-awareness-2026-09-24.md")
+    if (statSync(dayPage, { throwIfNoEntry: false })) {
+      expect(readFileSync(dayPage).includes(Buffer.from(canary))).toBe(false)
+    }
+    for (const path of [join(root, "ledger.db"), join(root, "index.db")]) {
+      expect(readFileSync(path).includes(Buffer.from(canary))).toBe(false)
+      const wal = `${path}-wal`
+      if (statSync(wal, { throwIfNoEntry: false })) {
+        expect(readFileSync(wal).includes(Buffer.from(canary))).toBe(false)
+      }
+    }
   } finally {
     indexDb.close()
     ledgerDb.close()

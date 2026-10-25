@@ -41,8 +41,8 @@ final class SideRuntime: ObservableObject {
         let mode = CaptureMode()
         let stream = CaptureStream(
             output: { [weak supervisor] event in try? supervisor?.sendEvent(event) },
-            browserPrivacyAllowed: { browser.isObservableForeground(bundleID: $0) },
-            browserURL: { browser.currentNormalizedURL(bundleID: $0) },
+            browserPrivacyAllowed: { browser.cachedObservableForeground(bundleID: $0) },
+            browserURL: { browser.cachedNormalizedURL(bundleID: $0) },
             foregroundWindowID: { bundleID in
                 guard let current = foreground(), current.bundleID == bundleID else { return nil }
                 return current.windowID
@@ -65,14 +65,16 @@ final class SideRuntime: ObservableObject {
                     guard let permissions else { return }
                     let wasAllowed = permissions.preflight().automation[bundleID] == true
                     let isAllowed = permissions.browserBecameForeground(bundleID).automation[bundleID] == true
-                    guard !wasAllowed, isAllowed,
-                          let app = NSWorkspace.shared.frontmostApplication,
+                    await browser.refreshForeground(bundleID: bundleID)
+                    guard let app = NSWorkspace.shared.frontmostApplication,
                           app.bundleIdentifier == bundleID else { return }
+                    guard !wasAllowed, isAllowed else { return }
                     observerHub?.activate(
                         bundleID: bundleID, appName: app.localizedName ?? "", pid: app.processIdentifier
                     )
                 }
-            }
+            },
+            invalidateCapture: { inputTap.stop() }
         )
         let sampleHealth = {
             var health = HelperHealth()
@@ -95,7 +97,10 @@ final class SideRuntime: ObservableObject {
         }
         let healthMonitor = HelperHealthMonitor(
             permissions: permissions, sample: sampleHealth,
-            send: { [weak supervisor] frame in try? supervisor?.sendFrame(frame) }
+            send: { [weak supervisor] frame in
+                guard let supervisor else { throw SupervisorTransportError.notRunning }
+                try supervisor.sendFrame(frame)
+            }
         )
         let services = LiveCommandRouterServices(
             stream: stream, observerHub: observerHub, workspaceObserver: workspaceObserver,
@@ -119,6 +124,12 @@ final class SideRuntime: ObservableObject {
 
         supervisor.onOtherCommand = { [weak self] line in
             await self?.route(line)
+        }
+        supervisor.onProcessReady = { [weak self] in
+            guard let self, self.started, !self.healthStarted else { return }
+            self.healthMonitor.resetForDaemonGeneration()
+            self.healthStarted = true
+            self.healthMonitor.start()
         }
         supervisor.onStateChange = { [weak self] state in
             self?.supervisorChanged(state)
@@ -189,6 +200,7 @@ final class SideRuntime: ObservableObject {
             }
         } else {
             healthMonitor.stop()
+            healthMonitor.resetForDaemonGeneration()
             healthStarted = false
             pauseCapture()
         }

@@ -60,6 +60,7 @@ beforeEach(() => {
     capture_typed_text: true,
     screen_ocr: false,
     aside_adapter: true,
+    browser_history_enabled: false,
     retention_days: 14,
     rules: [{ scope: "app", behavior: "do_not_observe", bundleId: "com.example.Secret" }],
     summary_model: { provider: providerId, modelId: "small" },
@@ -145,13 +146,15 @@ function response(method: string, params: unknown): unknown {
               ? "screen_ocr"
               : key === "asideAdapter"
                 ? "aside_adapter"
-                : key === "retentionDays"
-                  ? "retention_days"
-                  : key === "summaryModel"
-                    ? "summary_model"
-                    : key === "uiLanguage"
-                      ? "ui_language"
-                      : key
+                : key === "browserHistoryEnabled"
+                  ? "browser_history_enabled"
+                  : key === "retentionDays"
+                    ? "retention_days"
+                    : key === "summaryModel"
+                      ? "summary_model"
+                      : key === "uiLanguage"
+                        ? "ui_language"
+                        : key
         settings[resourceKey] = value
       }
       return settings
@@ -266,6 +269,7 @@ test("renders S2 approved section and explanatory copy when RPC is ready", async
     "Save the sentences you type. Side never stores keystrokes or password fields.",
     "When a page has no readable text, read it from the screen. Only the text is kept.",
     "When Aside Browser is in front, read the page through Aside for better text. Requires the Aside CLI.",
+    "Off by default. When enabled, agents can search supported browser history. Side redacts sensitive data and respects your denylist.",
     "Side never captures what you do in these apps and websites.",
     "Side deletes raw captures after this many days. Summaries stay.",
   ])
@@ -360,6 +364,27 @@ test("Aside switch persists its value and shows an unchecked health state clearl
   expect(row.querySelector(".setting-meta")?.textContent).toBe("아직 확인 전")
 })
 
+test("browser history switch is independent, defaults off, and persists its value", async () => {
+  const element = root()
+  mountApp(element, window, fakeFetch)
+  await settle()
+  const toggle = element.querySelector<HTMLButtonElement>(
+    '[aria-label="Include browser history in recall"]',
+  )
+  if (!toggle) throw new Error("Missing browser history switch")
+  expect(toggle.getAttribute("aria-checked")).toBe("false")
+
+  toggle.click()
+  await settle()
+
+  expect(calls.filter((call) => call.method === "settings.patch").at(-1)?.params).toEqual({
+    browserHistoryEnabled: true,
+  })
+  expect(settings["browser_history_enabled"]).toBe(true)
+  expect(settings["enabled"]).toBe(true)
+  expect(toggle.getAttribute("aria-checked")).toBe("true")
+})
+
 test("asks for missing Input Monitoring permission from the banner", async () => {
   const element = root()
   const permissionFetch: FetchLike = async (_input, init) => {
@@ -421,7 +446,7 @@ test("Never observe normalizes a website before adding a deny rule", async () =>
   expect(element.querySelector('[role="dialog"] h2')?.textContent).toBe("Never observe")
   click(element, '[data-action="source-website"]')
   await settle()
-  change(element, '[name="website"]', "https://Mail.Example.com/inbox")
+  change(element, '[name="website"]', "https://Mail.Example.com./inbox")
   await settle()
   click(element, '[data-action="save-rule"]')
   await settle()

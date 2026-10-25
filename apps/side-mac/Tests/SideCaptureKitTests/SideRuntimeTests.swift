@@ -72,7 +72,7 @@ final class SideRuntimeTests: XCTestCase {
     func testHealthFrameReportsAXFailureAndClearsAfterRecovery() async throws {
         let (directory, daemon) = try makeDaemonScript { directory in
             let output = directory.appendingPathComponent("health").path
-            return "IFS= read -r hello\nn=0\nwhile IFS= read -r frame; do\n  case \"$frame\" in\n    *'\"type\":\"health\"'*) n=$((n + 1)); printf '%s\\n' \"$frame\" > \"\(output)-$n\" ;;\n  esac\ndone\n"
+            return "IFS= read -r hello\nn=0\nwhile IFS= read -r frame; do\n  case \"$frame\" in\n    *'\"type\":\"health\"'*) n=$((n + 1)); printf '%s\\n' \"$frame\" > \"\(output)-$n.tmp\"; mv \"\(output)-$n.tmp\" \"\(output)-$n\" ;;\n  esac\ndone\n"
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         var failCreation = true
@@ -99,21 +99,21 @@ final class SideRuntimeTests: XCTestCase {
 
         runtime.observerHub.activate(bundleID: "com.example.synthetic", appName: "Synthetic", pid: getpid())
         try runtime.healthMonitor.refresh()
-        let failed = try object(from: await waitForFile(directory.appendingPathComponent("health-2")))
+        let failed = try object(from: await waitForFile(directory.appendingPathComponent("health-4")))
         XCTAssertEqual((failed["health"] as? [String: Any])?["observerRegistrationFailures"] as? Int, 1)
 
         failCreation = false
         runtime.observerHub.activate(bundleID: "com.example.synthetic", appName: "Synthetic", pid: getpid())
         try runtime.healthMonitor.refresh()
-        let recovered = try object(from: await waitForFile(directory.appendingPathComponent("health-3")))
+        let recovered = try object(from: await waitForFile(directory.appendingPathComponent("health-5")))
         XCTAssertEqual((recovered["health"] as? [String: Any])?["observerRegistrationFailures"] as? Int, 0)
     }
 
     func testStartSendsHealthWhileCaptureRemainsPausedAndStopEndsSupervisor() async throws {
-        // Given a daemon that records the first health frame without retaining the hello key.
+        // Given a daemon that records readiness and running health separately.
         let (directory, daemon) = try makeDaemonScript { directory in
             let output = directory.appendingPathComponent("health").path
-            return "IFS= read -r hello\nIFS= read -r frame\nprintf '%s\\n' \"$frame\" > '\(output).tmp'\nmv '\(output).tmp' '\(output)'\nwhile IFS= read -r ignored; do :; done\n"
+            return "IFS= read -r hello\nn=0\nwhile IFS= read -r frame; do\n  case \"$frame\" in\n    *'\"type\":\"health\"'*) n=$((n + 1)); printf '%s\\n' \"$frame\" > \"\(output)-$n.tmp\"; mv \"\(output)-$n.tmp\" \"\(output)-$n\" ;;\n  esac\ndone\n"
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         let supervisor = DaemonSupervisor(daemonURL: daemon, appVersion: "test", keyStore: RuntimeKeyStore())
@@ -123,7 +123,7 @@ final class SideRuntimeTests: XCTestCase {
         runtime.start()
         defer { runtime.stop() }
         runtime.stream.activate(bundleID: "com.example.Editor", appName: "Editor")
-        let health = try object(from: await waitForFile(directory.appendingPathComponent("health")))
+        let health = try object(from: await waitForFile(directory.appendingPathComponent("health-2")))
 
         // Then the daemon receives health, capture stays paused, and shutdown stops the supervisor.
         XCTAssertEqual(supervisor.state, .running)
@@ -147,15 +147,12 @@ final class SideRuntimeTests: XCTestCase {
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         var currentForeground = AXSnapshotForeground(bundleID: "com.google.Chrome", pid: 42, windowID: 31)
-        var switchOnURL = false
         let browser = BrowserCapture(
             frontmostBundleID: { "com.google.Chrome" },
+            foregroundWindowID: { _ in currentForeground.windowID },
             automationAllowed: { _ in true },
             runAppleScript: { script in
                 if script.contains("mode of front window") { return "normal" }
-                if switchOnURL {
-                    currentForeground = AXSnapshotForeground(bundleID: "com.example.Other", pid: 99, windowID: 99)
-                }
                 return "https://Example.com/path?token=hidden#fragment"
             }
         )
@@ -170,6 +167,7 @@ final class SideRuntimeTests: XCTestCase {
         runtime.start()
         defer { runtime.stop() }
         let reply = try object(from: await waitForFile(directory.appendingPathComponent("reply")))
+        await browser.refreshForeground(bundleID: "com.google.Chrome")
         runtime.stream.activate(bundleID: "com.google.Chrome", appName: "Chrome")
         XCTAssertTrue(runtime.stream.mayObserve(bundleID: "com.google.Chrome"))
         runtime.stream.emit(.windowChanged, bundleID: "com.google.Chrome", windowTitle: "Synthetic tab")
@@ -184,11 +182,10 @@ final class SideRuntimeTests: XCTestCase {
         XCTAssertEqual(payload["windowId"] as? Int, 31)
         XCTAssertFalse(String(decoding: try Data(contentsOf: directory.appendingPathComponent("event")), as: UTF8.self).contains("token=hidden"))
 
-        switchOnURL = true
+        currentForeground = AXSnapshotForeground(bundleID: "com.example.Other", pid: 99, windowID: 99)
         runtime.stream.emit(.windowChanged, bundleID: "com.google.Chrome", windowTitle: "Synthetic switched")
-        let switched = try object(from: await waitForFile(directory.appendingPathComponent("switched")))
-        let switchedPayload = try XCTUnwrap(switched["event"] as? [String: Any])
-        XCTAssertNil(switchedPayload["windowId"])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: directory.appendingPathComponent("switched").path))
     }
 
     func testDaemonRestartSendsFreshHealthAndRequiresNewObserverConfiguration() async throws {
@@ -196,7 +193,7 @@ final class SideRuntimeTests: XCTestCase {
         let (directory, daemon) = try makeDaemonScript { directory in
             let marker = directory.appendingPathComponent("first-start").path
             let secondHealth = directory.appendingPathComponent("second-health").path
-            return "IFS= read -r hello\nif [ ! -e '\(marker)' ]; then\n  : > '\(marker)'\n  printf '%s\\n' '{\"type\":\"command\",\"id\":\"configure-first\",\"name\":\"observer.configure\",\"args\":{\"deniedBundleIds\":[],\"captureTypedText\":true,\"screenOcr\":false,\"paused\":false}}'\n  while IFS= read -r frame; do\n    case \"$frame\" in *'\"id\":\"configure-first\"'*) exit 9 ;; esac\n  done\nelse\n  IFS= read -r frame\n  printf '%s\\n' \"$frame\" > '\(secondHealth).tmp'\n  mv '\(secondHealth).tmp' '\(secondHealth)'\n  while IFS= read -r ignored; do :; done\nfi\n"
+            return "IFS= read -r hello\nif [ ! -e '\(marker)' ]; then\n  : > '\(marker)'\n  printf '%s\\n' '{\"type\":\"command\",\"id\":\"configure-first\",\"name\":\"observer.configure\",\"args\":{\"deniedBundleIds\":[],\"captureTypedText\":true,\"screenOcr\":false,\"paused\":false}}'\n  while IFS= read -r frame; do\n    case \"$frame\" in *'\"id\":\"configure-first\"'*) exit 9 ;; esac\n  done\nelse\n  IFS= read -r readiness\n  IFS= read -r frame\n  printf '%s\\n' \"$frame\" > '\(secondHealth).tmp'\n  mv '\(secondHealth).tmp' '\(secondHealth)'\n  while IFS= read -r ignored; do :; done\nfi\n"
         }
         defer { try? FileManager.default.removeItem(at: directory) }
         let supervisor = DaemonSupervisor(daemonURL: daemon, appVersion: "test", keyStore: RuntimeKeyStore())

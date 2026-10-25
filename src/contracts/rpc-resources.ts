@@ -17,6 +17,21 @@ export const DayCountersSchema = z.strictObject({
   lastEventAt: EpochMs.optional(),
 })
 
+export const DaemonDiagnosticsSchema = z.strictObject({
+  last_error: z
+    .strictObject({
+      name: z.string(),
+      code: z.string().nullable(),
+      stage: z.string(),
+      timestamp: EpochMs,
+      consecutive_count: NonnegativeInt,
+    })
+    .nullable(),
+  last_successful_capture_at: EpochMs.nullable(),
+})
+
+export type DaemonDiagnosticsSnapshot = z.infer<typeof DaemonDiagnosticsSchema>
+
 export const CaptureStatusSchema = z.strictObject({
   enabled: z.boolean(),
   state: z.enum(["starting", "running", "paused", "stopped"]),
@@ -26,6 +41,7 @@ export const CaptureStatusSchema = z.strictObject({
   health: HelperHealthSchema,
   today: DayCountersSchema,
   url_denied: z.boolean(),
+  diagnostics: DaemonDiagnosticsSchema,
 })
 
 export const PermissionsSchema = z.strictObject({
@@ -91,6 +107,7 @@ export const SettingsResourceSchema = z.strictObject({
   capture_typed_text: z.boolean(),
   screen_ocr: z.boolean(),
   aside_adapter: z.boolean(),
+  browser_history_enabled: z.boolean(),
   retention_days: RetentionChoiceSchema,
   rules: z.array(RuleSchema).max(500),
   summary_model: ModelRefSchema.nullable(),

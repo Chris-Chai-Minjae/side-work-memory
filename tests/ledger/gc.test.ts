@@ -186,30 +186,98 @@ describe("ledger GC", () => {
     })
   })
 
-  test("Given a frame with fewer than half its blobs expired, when GC runs, then the frame keeps its original membership", () => {
+  test("Given a frame with even one expired blob, when GC runs, then it scrubs that member and preserves its neighbors", () => {
     withLedger((db) => {
-      for (const [index, content] of [
+      const written = [
         "Synthetic expired violet moon",
         "Synthetic live amber moon",
         "Synthetic live teal moon",
-      ].entries()) {
+      ].map((content, index) =>
         writeLedgerEvent(db, masterKey, {
           occurredAt: index === 0 ? now - 2 * MS_PER_DAY : now,
           source: "mac_ax",
           kind: "content.snapshot",
           content,
-        })
-      }
+        }),
+      )
       expect(sealColdBlobs(db, masterKey, now + FRAME_COLD_AGE_MS + 1)).toBe(3)
 
       const result = runLedgerGc(db, masterKey, { now, retentionDays: RETENTION_DAYS_MIN })
 
-      expect(result.compactedFrames).toBe(0)
+      expect(result.compactedFrames).toBe(1)
       expect(
         db
           .query<{ member_count: number }, []>("SELECT member_count FROM context_awareness_frames")
           .get()?.member_count,
-      ).toBe(3)
+      ).toBe(2)
+      for (const [index, event] of written.entries()) {
+        if (!event.blobId) throw new Error("Synthetic framed event has no blob")
+        expect(readBlobContent(db, masterKey, event.blobId)).toBe(
+          index === 0
+            ? null
+            : index === 1
+              ? "Synthetic live amber moon"
+              : "Synthetic live teal moon",
+        )
+      }
+    })
+  })
+
+  test("Given content exactly at and then over 64MiB, when GC runs, then only the oldest excess content expires", () => {
+    withLedger((db) => {
+      const insert = (id: string, occurredAt: number, bytes: number) => {
+        db.query(`
+          INSERT INTO context_awareness_blobs
+            (id, content_hash, content, redacted_bytes, created_at, last_seen_at)
+          VALUES (?, ?, x'', ?, ?, ?)
+        `).run(id, `hash-${id}`, bytes, occurredAt, occurredAt)
+        db.query(`
+          INSERT INTO context_awareness_events (id, occurred_at, source, kind, payload, blob_id)
+          VALUES (?, ?, 'mac_ax', 'content.snapshot', '{}', ?)
+        `).run(`event-${id}`, occurredAt, id)
+      }
+      insert("oldest", now - 2, 33_554_432)
+      insert("newest", now - 1, 33_554_432)
+
+      expect(runLedgerGc(db, masterKey, { now, retentionDays: RETENTION_DAYS_MIN })).toMatchObject({
+        deletedEvents: 0,
+        deletedBlobs: 0,
+      })
+      insert("overflow", now, 1)
+      expect(runLedgerGc(db, masterKey, { now, retentionDays: RETENTION_DAYS_MIN })).toMatchObject({
+        deletedEvents: 1,
+        deletedBlobs: 1,
+      })
+      expect(
+        db.query<{ id: string }, []>("SELECT id FROM context_awareness_blobs ORDER BY id").all(),
+      ).toEqual([{ id: "newest" }, { id: "overflow" }])
+    })
+  })
+
+  test("Given over-budget content shared by old and current events, when GC runs, then all references expire together", () => {
+    withLedger((db) => {
+      db.query(`
+        INSERT INTO context_awareness_blobs
+          (id, content_hash, content, redacted_bytes, created_at, last_seen_at)
+        VALUES ('shared', 'hash-shared', x'', 67_108_865, ?, ?)
+      `).run(now - 2, now)
+      for (const [id, occurredAt] of [
+        ["old", now - 2],
+        ["current", now],
+      ] as const) {
+        db.query(`
+          INSERT INTO context_awareness_events (id, occurred_at, source, kind, payload, blob_id)
+          VALUES (?, ?, 'mac_ax', 'content.snapshot', '{}', 'shared')
+        `).run(id, occurredAt)
+      }
+
+      expect(runLedgerGc(db, masterKey, { now, retentionDays: RETENTION_DAYS_MIN })).toMatchObject({
+        deletedEvents: 2,
+        deletedBlobs: 1,
+      })
+      expect(count(db, "context_awareness_events")).toBe(0)
+      expect(count(db, "context_awareness_blobs")).toBe(0)
+      expect(db.query("PRAGMA foreign_key_check").all()).toEqual([])
     })
   })
 

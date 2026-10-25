@@ -40,7 +40,7 @@ function fixture(): {
     options: {
       applicationSupportPath,
       temporaryRoot,
-      settings: { rules: [], retentionDays: 14 },
+      settings: { rules: [], retentionDays: 14, browserHistoryEnabled: true },
       now: () => now,
     },
   }
@@ -125,6 +125,7 @@ test("Given denied and expired visits, when searched, then only allowed visits i
     ...options,
     settings: {
       retentionDays: 14,
+      browserHistoryEnabled: true,
       rules: [
         { scope: "url", behavior: "do_not_observe", urlDomain: "private.invalid" },
         { scope: "url", behavior: "observe", urlDomain: "keep.invalid" },
@@ -144,6 +145,62 @@ test("Given denied and expired visits, when searched, then only allowed visits i
   ])
   expect(statSync(source.path).mtimeMs).toBe(initialMtime.getTime())
   expect(readdirSync(options.temporaryRoot)).toEqual([])
+})
+
+test("Given browser history is disabled, when searched, then no browser profile is read", async () => {
+  const { options } = fixture()
+  const source = history(options, "Google/Chrome/Default", [
+    { id: 1, at: now, url: "https://fixture.invalid/aurora", title: "Aurora" },
+  ])
+  source.db.close()
+
+  const rows = await createBrowserHistoryProvider({
+    ...options,
+    settings: { ...options.settings, browserHistoryEnabled: false },
+  })({ terms: ["aurora"] })
+
+  expect(rows).toEqual([])
+  expect(readdirSync(options.temporaryRoot)).toEqual([])
+})
+
+test("Given one denied browser app, when searched, then only other browsers contribute visits", async () => {
+  const { options } = fixture()
+  for (const path of ["Google/Chrome/Default", "Microsoft Edge/Default"]) {
+    const source = history(options, path, [
+      { id: 1, at: now, url: "https://fixture.invalid/aurora", title: "Aurora" },
+    ])
+    source.db.close()
+  }
+
+  const rows = await createBrowserHistoryProvider({
+    ...options,
+    settings: {
+      ...options.settings,
+      rules: [{ scope: "app", behavior: "do_not_observe", bundleId: "com.google.Chrome" }],
+    },
+  })({ terms: ["aurora"] })
+
+  expect(rows.map((row) => row.browser)).toEqual(["edge"])
+})
+
+test("Given a secret in a URL path, when searched, then the returned URL is redacted", async () => {
+  const { options } = fixture()
+  const token = `sk-ant-api03-${"A".repeat(30)}`
+  const source = history(options, "Google/Chrome/Default", [
+    {
+      id: 1,
+      at: now,
+      url: `https://fixture.invalid/aurora/${token}`,
+      title: "Aurora",
+    },
+  ])
+  source.db.close()
+
+  const rows = await createBrowserHistoryProvider(options)({ terms: ["aurora"] })
+
+  expect(rows).toHaveLength(1)
+  expect(rows[0]?.url).toContain("redacted")
+  expect(rows[0]?.url).not.toContain(token)
 })
 
 test("Given a time window, when searched, then only visits inside both window and retention remain", async () => {

@@ -38,6 +38,31 @@ final class ObserverTests: XCTestCase {
         XCTAssertEqual(hub.observerRegistrationFailures, 0)
     }
 
+    func testAXCreationFailureRetriesAfterBackoffWithoutNewActivation() async throws {
+        var failCreation = true
+        let stream = CaptureStream(output: { _ in }, secureInputEnabled: { false })
+        stream.configure(deniedBundleIds: [], captureTypedText: true, paused: false)
+        let recovered = expectation(description: "AX observer recreated after backoff")
+        let hub = AXObserverHub(
+            stream: stream, isTrusted: { true },
+            createObserver: { pid, callback in
+                guard !failCreation else { return nil }
+                var observer: AXObserver?
+                XCTAssertEqual(AXObserverCreate(pid, callback, &observer), .success)
+                recovered.fulfill()
+                return observer
+            },
+            registerNotification: { _, _, _, _ in .success }
+        )
+        hub.activate(bundleID: "com.example.synthetic", appName: "Synthetic", pid: getpid())
+        failCreation = false
+
+        await fulfillment(of: [recovered], timeout: 2)
+        XCTAssertEqual(hub.registrationAttempts, 2)
+        XCTAssertEqual(hub.observerRegistrationFailures, 0)
+        hub.stop()
+    }
+
     func testFailedAXNotificationIsCountedEvenWhenAnotherRegistrationSucceeds() {
         var failWindowNotification = true
         let stream = CaptureStream(output: { _ in }, secureInputEnabled: { false })
@@ -339,6 +364,25 @@ final class ObserverTests: XCTestCase {
         // Then the stream has exactly one event for each state transition.
         XCTAssertEqual(events.map(\.kind), [.sessionStarted, .sessionEnded])
         XCTAssertEqual(events.map(\.reason), ["wake", "lock"])
+    }
+
+    func testSessionEndInvalidatesInputAndActiveCaptureGeneration() {
+        let stream = CaptureStream(output: { _ in }, secureInputEnabled: { false })
+        stream.configure(deniedBundleIds: [], captureTypedText: true, paused: false)
+        stream.activate(bundleID: "com.example.Editor", appName: "Editor")
+        var invalidations = 0
+        let workspace = WorkspaceObserver(
+            stream: stream, axObserver: AXObserverHub(stream: stream),
+            invalidateCapture: { invalidations += 1 }
+        )
+        workspace.recordSessionStarted(reason: "startup")
+        let generation = stream.generation
+
+        workspace.recordSessionEnded(reason: "lock")
+
+        XCTAssertEqual(invalidations, 1)
+        XCTAssertEqual(stream.generation, generation + 1)
+        XCTAssertFalse(stream.mayObserve(bundleID: "com.example.Editor"))
     }
 
     func testTypedDraftOverflowDropsWholeRunBeforeNextSentence() {

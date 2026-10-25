@@ -77,7 +77,7 @@ test("Given a v1 config, when loaded, then rules and indefinite pause migrate to
       enabled: true,
       pausedUntil: "indefinite",
       deniedApps: ["com.example.Private"],
-      deniedWebsites: ["private.example"],
+      deniedWebsites: ["PRIVATE.EXAMPLE."],
       retentionDays: 7,
       intervalSeconds: 15,
     })

@@ -22,7 +22,16 @@ function fixture() {
   const resources = join(contents, "Resources")
   mkdirSync(macOS, { recursive: true })
   mkdirSync(join(resources, "lib"), { recursive: true })
+  mkdirSync(join(resources, "metadata"), { recursive: true })
   writeFileSync(join(contents, "Info.plist"), readFileSync(sourceInfo))
+  for (const name of [
+    "THIRD_PARTY_NOTICES.txt",
+    "sbom.json",
+    "model-provenance.json",
+    "build-manifest.json",
+  ]) {
+    writeFileSync(join(resources, "metadata", name), "synthetic metadata")
+  }
   for (const file of [
     join(macOS, "Side"),
     join(resources, "side"),
@@ -101,6 +110,7 @@ test("synthetic Accepted notarization signs nested code first and staples before
     const log = join(root, "calls.log")
     const identity = "Developer ID Application: Synthetic Team (SYNTHETIC)"
     const fakeCommands: Record<string, string> = {
+      bun: '#!/bin/sh\nprintf "REDISTRIBUTION: PASS synthetic\\n"',
       security: `#!/bin/sh\nprintf '  1) ABCDEF "${identity}"\\n     1 valid identities found\\n'`,
       codesign: '#!/bin/sh\nprintf "codesign %s\\n" "$*" >> "$SIDE_TEST_LOG"',
       xcrun:
@@ -143,10 +153,11 @@ test("synthetic Invalid notarization never staples or publishes a ZIP", () => {
     const log = join(root, "calls.log")
     const identity = "Developer ID Application: Synthetic Team (SYNTHETIC)"
     for (const [name, source] of Object.entries({
+      bun: '#!/bin/sh\nprintf "REDISTRIBUTION: PASS synthetic\\n"',
       security: `#!/bin/sh\nprintf '  1) ABCDEF "${identity}"\\n'`,
       codesign: "#!/bin/sh\nexit 0",
       xcrun:
-        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SIDE_TEST_LOG"\nif [ "$1" = notarytool ]; then printf \'{"id":"synthetic-id","status":"Invalid"}\\n\'; fi',
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SIDE_TEST_LOG"\nif [ "$1" = notarytool ] && [ "$2" = submit ]; then printf \'{"id":"synthetic-id","status":"Invalid"}\\n\'; fi\nif [ "$1" = notarytool ] && [ "$2" = log ]; then printf \'{"issues":[{"message":"synthetic invalid diagnostic"}]}\n\'; fi',
     })) {
       const path = join(bin, name)
       writeFileSync(path, source)
@@ -159,7 +170,10 @@ test("synthetic Invalid notarization never staples or publishes a ZIP", () => {
     })
     expect(result.code).not.toBe(0)
     expect(result.output).toContain("Invalid")
+    expect(result.output).toContain("synthetic invalid diagnostic")
+    expect(result.output).toContain("redistribution artifact was not published")
     expect(existsSync(output)).toBe(false)
+    expect(readFileSync(log, "utf8")).toContain("notarytool log synthetic-id")
     expect(readFileSync(log, "utf8")).not.toContain("stapler")
   } finally {
     rmSync(root, { recursive: true, force: true })

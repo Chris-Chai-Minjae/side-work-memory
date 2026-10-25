@@ -92,6 +92,8 @@ open /Applications/Side.app
 
 Screen Recording은 선택 사항입니다. 메뉴바 **설정 → 권한**에서 각 항목의 상태를 따로 확인하고, 필요한 macOS 설정 화면을 바로 열 수 있습니다. 권한이 잡히지 않거나 요약이 비어 있을 때 쓰는 진단 명령과 복구 순서는 [상세 설명서](docs/manual.md)에 있습니다.
 
+브라우저 자체 방문 기록 검색은 설정에서 별도로 켜는 옵트인이며 기본값은 꺼짐입니다. Safari는 시크릿 창 상태를 확실히 구분할 수 없어 현재 활성 창 캡처를 실패 시 차단(fail-closed)합니다.
+
 요약에는 MiMo 2.6 Pro를 기본 제공자, MiniMax M3를 대체 제공자로 설정하는 방법이 있습니다. API 키 제공자 외에 공식 Codex CLI에서 `codex login`으로 ChatGPT에 로그인한 뒤 Side의 **OpenAI (Codex login)**을 선택하거나, Claude CLI에서 `claude auth login`한 뒤 Claude Code 로그인 옵션을 선택할 수도 있습니다. 이는 요약 제공자 설정이며 MCP 등록과 별개입니다. CLI 로그인을 Side 요약에 사용할 때는 각 서비스의 약관과 사용량 제한을 확인하고 본인 책임으로 사용하세요. CLI 로그인 토큰 파일을 직접 열어 볼 필요는 없습니다. Codex 로그인이 Keychain에만 저장된 환경은 현재 이 옵션을 사용할 수 없습니다.
 
 ## 프라이버시

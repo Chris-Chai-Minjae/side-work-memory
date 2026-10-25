@@ -113,7 +113,7 @@ function contentWindow(body: string, match: string | undefined, contextLines: nu
   return `Content (lines ${start + 1}–${end}):\n${lines.slice(start, end).join("\n")}`
 }
 
-function eventDraft(context: HistoryReadContext, request: HistoryReadRequest): ReadDraft {
+function eventDraft(context: HistoryReadContext, request: HistoryReadRequest): ReadDraft | null {
   const id = request.id.slice(2)
   const row = context.db
     .query<EventRow, [string]>(`
@@ -122,7 +122,10 @@ function eventDraft(context: HistoryReadContext, request: HistoryReadRequest): R
       FROM context_awareness_events WHERE id = ?
     `)
     .get(id)
-  if (!row) return expiredDraft(context.db, request.id)
+  if (!row) {
+    const summaries = citingSummaries(context.db, request.id)
+    return summaries.length === 0 ? null : expiredDraft(context.db, request.id)
+  }
   const key = deriveSubkey(context.masterKey, "evidence")
   const aad = (column: string): string => `context_awareness_events:${column}:${id}`
   const title =
@@ -168,6 +171,7 @@ function summaryDraft(context: HistoryReadContext, request: HistoryReadRequest):
     .get(request.id.slice(2))
   if (!row) return null
   const apps: unknown = JSON.parse(row.apps)
+  const citations = z.array(z.object({ ref: z.string() })).parse(JSON.parse(row.citations))
   return {
     id: request.id,
     occurred_at: row.window_from,
@@ -178,7 +182,7 @@ function summaryDraft(context: HistoryReadContext, request: HistoryReadRequest):
     content: [
       `Title: ${row.title}`,
       `Description: ${row.description}`,
-      `Citations: ${row.citations}`,
+      `Citations: ${JSON.stringify(citations)}`,
       `Body: ${row.body ?? ""}`,
     ].join("\n"),
   }
@@ -248,6 +252,13 @@ export function historyRead(
 ): HistoryReadResult | null {
   const parsed = ReadRequestSchema.safeParse(request)
   if (!parsed.success) throw new HistoryReadInputError()
+  if (parsed.data.id.startsWith("e:")) {
+    try {
+      decodeTime(parsed.data.id.slice(2))
+    } catch {
+      throw new HistoryReadInputError()
+    }
+  }
   for (let attempt = 0; attempt <= RECALL_EPOCH_RETRY_LIMIT; attempt++) {
     const started = readEpoch(context.db)
     const draft = parsed.data.id.startsWith("e:")

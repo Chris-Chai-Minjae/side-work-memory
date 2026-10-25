@@ -66,6 +66,11 @@ public enum CaptureProtocol {
         let health: HelperHealth
     }
 
+    private struct Ping: Encodable {
+        let type = "ping"
+        let id: String
+    }
+
     private struct Event<Payload: Encodable>: Encodable {
         let type = "event"
         let event: Payload
@@ -97,6 +102,10 @@ public enum CaptureProtocol {
 
     public static func encodeHealth(_ health: HelperHealth) throws -> Data {
         try line(Health(health: health))
+    }
+
+    public static func encodePing(id: String) throws -> Data {
+        try line(Ping(id: id))
     }
 
     public static func encodeEvent<Payload: Encodable>(_ event: Payload) throws -> Data {

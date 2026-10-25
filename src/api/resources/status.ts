@@ -2,6 +2,7 @@ import { z } from "zod"
 import type { HelperHealth } from "../../contracts/protocol"
 import { PermissionKindSchema } from "../../contracts/protocol"
 import { RpcMethods } from "../../contracts/rpc"
+import type { DaemonDiagnosticsSnapshot } from "../../contracts/rpc-resources"
 import type { Settings } from "../../contracts/settings"
 import type { ReconcileState } from "../../daemon/reconcile"
 import type { HelperCommandRequest } from "../../helper/client"
@@ -58,6 +59,7 @@ export type StatusResourceDependencies = {
   readonly getAsideAdapterHealth?: () => HelperHealth["asideAdapter"]
   readonly onAutomationPermissions?: (automation: Readonly<Record<string, boolean>>) => void
   readonly now: () => number
+  readonly getDiagnostics?: () => DaemonDiagnosticsSnapshot
   readonly mutateSettings?: SettingsMutation
 }
 
@@ -142,6 +144,10 @@ export function createStatusHandlers(dependencies: StatusResourceDependencies): 
         health,
         today: dependencies.getToday(),
         url_denied: input?.url ? isDeniedHost(new URL(input.url).hostname, capture.rules) : false,
+        diagnostics: dependencies.getDiagnostics?.() ?? {
+          last_error: null,
+          last_successful_capture_at: null,
+        },
       }
     },
     async permissions() {

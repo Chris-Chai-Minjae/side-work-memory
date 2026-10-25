@@ -1,10 +1,22 @@
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { saveSettings } from "../../src/config/index"
+import { SettingsSchema } from "../../src/contracts/settings"
 import { sealColdBlobs } from "../../src/ledger/frames"
 import { openLedger } from "../../src/ledger/schema"
 import { writeLedgerEvent } from "../../src/ledger/write"
+import { openIndexDb } from "../../src/memory/index-db"
 import { renderContextAwarenessDayPage } from "../../src/memory/render"
+import { truncateWal } from "../../src/sqlite/checkpoint"
 
 export function footprintBytes(sizes: readonly number[]): number {
   if (sizes.length === 0 || sizes.some((size) => size < 0)) {
@@ -17,9 +29,19 @@ function size(path: string): number {
   return existsSync(path) ? statSync(path).size : 0
 }
 
+export function dataRootFootprintBytes(root: string): number {
+  const sizes: number[] = []
+  for (const entry of readdirSync(root, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile()) sizes.push(statSync(join(entry.parentPath, entry.name)).size)
+  }
+  return sizes.length === 0 ? 0 : footprintBytes(sizes)
+}
+
 export async function measureEightHourDisk(): Promise<{
   readonly ledgerBytes: number
   readonly dayPageBytes: number
+  readonly indexBytes: number
+  readonly operationalBytes: number
   readonly totalBytes: number
   readonly events: number
   readonly summaries: number
@@ -30,7 +52,9 @@ export async function measureEightHourDisk(): Promise<{
   const day = "2026-09-20"
   const dayStart = new Date(2026, 8, 20, 9).getTime()
   try {
-    const ledger = join(root, "ledger.db")
+    const ledgerDirectory = join(root, "context-awareness")
+    mkdirSync(ledgerDirectory, { recursive: true })
+    const ledger = join(ledgerDirectory, "ledger.db")
     const db = openLedger(ledger)
     try {
       for (let window = 0; window < 48; window++) {
@@ -68,17 +92,45 @@ export async function measureEightHourDisk(): Promise<{
       }
       const rendered = await renderContextAwarenessDayPage(db, root, day, dayStart + 86_400_000)
       if (rendered.status !== "committed") throw new Error("Day page was not committed")
-      db.exec("PRAGMA wal_checkpoint(TRUNCATE)")
+      await saveSettings(root, SettingsSchema.parse({ version: 2, contextAwareness: {} }))
+      const index = join(root, "index.db")
+      const indexDb = openIndexDb(index)
+      try {
+        truncateWal(indexDb)
+      } finally {
+        indexDb.close()
+      }
+      const run = join(root, "run")
+      mkdirSync(run, { recursive: true })
+      const usage = {
+        timestamp: dayStart,
+        clientName: "synthetic",
+        tool: "history_search",
+        resultCount: 1,
+        latencyMs: 5,
+      }
+      writeFileSync(join(run, "mcp-usage.jsonl"), `${JSON.stringify(usage)}\n`, { mode: 0o600 })
+      writeFileSync(join(run, "mcp-usage.jsonl.1"), `${JSON.stringify(usage)}\n`, { mode: 0o600 })
+      writeFileSync(
+        join(run, "diagnostics.jsonl"),
+        `${JSON.stringify({ type: "capture-success", timestamp: dayStart })}\n`,
+        { mode: 0o600 },
+      )
+      truncateWal(db)
       const ledgerBytes = footprintBytes([
         size(ledger),
         size(`${ledger}-wal`),
         size(`${ledger}-shm`),
       ])
       const dayPageBytes = size(join(root, "memory", "episodic", `context-awareness-${day}.md`))
+      const indexBytes = footprintBytes([size(index), size(`${index}-wal`), size(`${index}-shm`)])
+      const totalBytes = dataRootFootprintBytes(root)
       return {
         ledgerBytes,
         dayPageBytes,
-        totalBytes: ledgerBytes + dayPageBytes,
+        indexBytes,
+        operationalBytes: totalBytes - ledgerBytes - dayPageBytes - indexBytes,
+        totalBytes,
         events: 96,
         summaries: 48,
         sealedBlobs,
@@ -96,7 +148,7 @@ if (import.meta.main) {
   console.log(
     JSON.stringify({
       scope:
-        "synthetic 8-hour day; real ledger write, frame seal, and day-page render; no index.db",
+        "synthetic 8-hour day; all regular data-root files including ledger, day page, index, settings, MCP and diagnostic logs",
       ...(await measureEightHourDisk()),
     }),
   )

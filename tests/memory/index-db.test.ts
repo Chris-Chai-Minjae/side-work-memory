@@ -19,6 +19,9 @@ test("Given a new index, when opened, then trigram FTS and 384-dimensional cosin
       expect(schema.find(({ name }) => name === "chunks_vec")?.sql).toContain(
         "float[384] distance_metric=cosine",
       )
+      expect(
+        db.query<{ secure_delete: number }, []>("PRAGMA secure_delete").get()?.secure_delete,
+      ).toBe(1)
     } finally {
       db.close()
     }

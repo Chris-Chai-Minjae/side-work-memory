@@ -2,6 +2,7 @@
 set -eu
 
 package_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_dir=$(CDPATH= cd -- "$package_dir/../.." && pwd)
 entitlements="$package_dir/Side.entitlements"
 
 fail() {
@@ -22,10 +23,16 @@ preflight() {
     Contents/Resources/side \
     Contents/Resources/lib/libsqlite3.dylib \
     Contents/Resources/lib/vec0.dylib \
-    Contents/Resources/lib/libonnxruntime.1.dylib; do
-    [ -f "$app/$item" ] || fail "Missing bundle code: $item"
+    Contents/Resources/lib/libonnxruntime.1.dylib \
+    Contents/Resources/metadata/THIRD_PARTY_NOTICES.txt \
+    Contents/Resources/metadata/sbom.json \
+    Contents/Resources/metadata/model-provenance.json \
+    Contents/Resources/metadata/build-manifest.json; do
+    [ -s "$app/$item" ] || fail "Missing bundle release asset: $item"
   done
   plutil -lint "$app/Contents/Info.plist" "$entitlements" >/dev/null || fail "Invalid release plist"
+  required_string CFBundleShortVersionString "$app/Contents/Info.plist"
+  required_string CFBundleVersion "$app/Contents/Info.plist"
   required_string NSAppleEventsUsageDescription "$app/Contents/Info.plist"
   required_string NSScreenCaptureUsageDescription "$app/Contents/Info.plist"
   enabled=$(plutil -extract 'com\.apple\.security\.automation\.apple-events' raw -o - "$entitlements") || fail "Missing Apple Events entitlement"
@@ -33,10 +40,19 @@ preflight() {
   printf '%s\n' "PASS release preflight: $app"
 }
 
+redistribution() {
+  (cd "$repo_dir" && bun run scripts/gates/verify-redistribution.ts "$1")
+}
+
 case "${1:-}" in
   preflight)
     [ "$#" -eq 2 ] || fail "Usage: $0 preflight Side.app"
     preflight "$2"
+    ;;
+  redistribute)
+    [ "$#" -eq 2 ] || fail "Usage: $0 redistribute Side.app"
+    preflight "$2"
+    redistribution "$2"
     ;;
   release)
     [ "$#" -eq 5 ] || fail "Usage: $0 release Side.app 'Developer ID Application: ...' keychain-profile output.zip"
@@ -54,6 +70,7 @@ case "${1:-}" in
     output_parent=$(dirname -- "$output_zip")
     [ -d "$output_parent" ] || fail "Output directory does not exist: $output_parent"
     security find-identity -v -p codesigning | grep -F "\"$identity\"" >/dev/null || fail "Developer ID identity is not installed: $identity"
+    redistribution "$source_app"
 
     work_dir=$(mktemp -d "${TMPDIR:-/tmp}/side-notarize.XXXXXX")
     output_work_dir=$(mktemp -d "$output_parent/.side-release.XXXXXX")
@@ -70,16 +87,30 @@ case "${1:-}" in
       "$resources/side"; do
       codesign --force --sign "$identity" --options runtime --timestamp "$item"
     done
+    (cd "$repo_dir" && bun run scripts/gates/build-manifest.ts "$app")
     codesign --force --sign "$identity" --options runtime --timestamp --entitlements "$entitlements" "$app"
     codesign --verify --deep --strict --verbose=2 "$app"
+    redistribution "$app"
 
     upload_zip="$work_dir/Side-upload.zip"
     ditto -c -k --keepParent "$app" "$upload_zip"
-    submission=$(xcrun notarytool submit "$upload_zip" --keychain-profile "$profile" --wait --output-format json)
+    if ! submission=$(xcrun notarytool submit "$upload_zip" --keychain-profile "$profile" --wait --output-format json); then
+      fail "NOTARIZATION: ERROR submission command failed: $submission"
+    fi
     status=$(printf '%s' "$submission" | plutil -extract status raw -o - -) || fail "Could not read notarization status"
     submission_id=$(printf '%s' "$submission" | plutil -extract id raw -o - -) || fail "Could not read notarization submission ID"
-    printf 'Notarization %s: %s\n' "$submission_id" "$status"
-    [ "$status" = Accepted ] || fail "Notarization was not accepted: $status"
+    printf 'NOTARIZATION: %s (%s)\n' "$status" "$submission_id"
+    if [ "$status" != Accepted ]; then
+      notary_log="$work_dir/notary-log.txt"
+      if xcrun notarytool log "$submission_id" --keychain-profile "$profile" >"$notary_log" 2>&1; then
+        printf '%s\n' '--- notarytool log (last 16 KiB) ---' >&2
+        tail -c 16384 "$notary_log" >&2
+      else
+        printf '%s\n' 'Could not retrieve notarytool log:' >&2
+        tail -c 4096 "$notary_log" >&2
+      fi
+      fail "NOTARIZATION: FAIL $status; redistribution artifact was not published"
+    fi
 
     xcrun stapler staple "$app"
     xcrun stapler validate "$app"
@@ -91,7 +122,7 @@ case "${1:-}" in
     ditto -c -k --keepParent "$app" "$output_work_dir/Side.zip"
     [ ! -e "$output_zip" ] || fail "Output ZIP appeared during release: $output_zip"
     mv "$output_work_dir/Side.zip" "$output_zip"
-    printf 'PASS signed and notarized release: %s\n' "$output_zip"
+    printf 'NOTARIZATION: PASS; REDISTRIBUTION: PASS signed release: %s\n' "$output_zip"
     ;;
-  *) fail "Usage: $0 preflight Side.app | release Side.app identity keychain-profile output.zip" ;;
+  *) fail "Usage: $0 preflight Side.app | redistribute Side.app | release Side.app identity keychain-profile output.zip" ;;
 esac

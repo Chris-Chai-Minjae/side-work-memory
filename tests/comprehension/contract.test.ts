@@ -136,6 +136,33 @@ test("citation and source ids must have valid e:/s: shape and be in briefing evi
   expect(result.rules.some((rule) => rule.includes("sourceIds.1"))).toBe(true)
 })
 
+test("empty citations and sourceIds require repair with at least one valid ref", async () => {
+  const empty = { ...valid, citations: [], sourceIds: [] }
+  const checked = validateRecordSummary(empty, briefing)
+  expect(checked.ok).toBe(false)
+  if (checked.ok) return
+  expect(checked.rules).toContain("citations/sourceIds: at least one ref must appear in briefing")
+
+  let calls = 0
+  await runSummaryWithOneRepair(briefing, async () => {
+    calls++
+    return calls === 1 ? empty : valid
+  })
+  expect(calls).toBe(2)
+})
+
+test("model-provided citation titles and URLs are discarded", () => {
+  const result = validateRecordSummary(
+    {
+      ...valid,
+      citations: [{ ref: eventRef, title: "Forged title", url: "https://attacker.invalid" }],
+    },
+    briefing,
+  )
+  expect(result.ok).toBe(true)
+  if (result.ok) expect(result.summary.citations).toEqual([{ ref: eventRef }])
+})
+
 test("apps and domains outside briefing are rejected", () => {
   const result = validateRecordSummary(
     { ...valid, apps: ["Other"], domains: ["other.example"] },

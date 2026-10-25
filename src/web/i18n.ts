@@ -93,6 +93,9 @@ const korean = {
   "Allow Screen Recording": "화면 기록 허용",
   "When a page has no readable text, read it from the screen. Only the text is kept.":
     "페이지에서 텍스트를 읽을 수 없을 때 화면에서 읽습니다. 텍스트만 보관합니다.",
+  "Include browser history in recall": "브라우저 기록을 회상에 포함",
+  "Off by default. When enabled, agents can search supported browser history. Side redacts sensitive data and respects your denylist.":
+    "기본값은 꺼짐입니다. 켜면 에이전트가 지원 브라우저의 기록을 검색할 수 있습니다. Side는 민감한 데이터를 가리고 캡처 제외 목록을 적용합니다.",
   "Use Aside Browser page content": "Aside Browser 페이지 내용 사용",
   "When Aside Browser is in front, read the page through Aside for better text. Requires the Aside CLI.":
     "Aside Browser가 앞에 있을 때 Aside를 통해 페이지 텍스트를 읽습니다. Aside CLI가 필요합니다.",

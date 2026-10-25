@@ -10,6 +10,7 @@ import { clearLedger } from "../../ledger/delete"
 import { compactFrame } from "../../ledger/frames"
 import type { LedgerStats } from "../../ledger/stats"
 import { renderContextAwarenessDayPage } from "../../memory/render"
+import { truncateWal } from "../../sqlite/checkpoint"
 
 const DescriptionSchema = z.array(z.string())
 const CitationsSchema = z.array(CitationSchema)
@@ -205,6 +206,7 @@ export function createHistoryHandlers(dependencies: HistoryDependencies): Histor
           })
         } finally {
           await dependencies.afterClear?.()
+          truncateWal(db)
         }
         return {
           deleted_events: result.deletedEvents,

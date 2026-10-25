@@ -1,5 +1,3 @@
-import { sensitiveFieldRule } from "../redact/fields"
-
 export type AriaFieldSuppression = {
   readonly tree: string
   readonly suppressed: number
@@ -79,11 +77,7 @@ export function suppressAriaFields(tree: string): AriaFieldSuppression {
       continue
     }
     suppressed++
-    safe.push(
-      input.name !== undefined && sensitiveFieldRule({ ariaName: input.name }) !== null
-        ? `${input.header}: [redacted:field]`
-        : input.header,
-    )
+    safe.push(`${input.header}: [redacted:field]`)
     index = childEnd - 1
   }
   return { tree: safe.join("\n"), suppressed }

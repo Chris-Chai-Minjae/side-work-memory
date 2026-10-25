@@ -1,6 +1,7 @@
 import { readdirSync } from "node:fs"
 import { dataDirectory } from "../config/index"
 import type { RpcMethodName } from "../contracts/rpc"
+import { DaemonDiagnosticsSchema } from "../contracts/rpc-resources"
 import { modelCacheDirectory } from "../memory/embed"
 import { openIndexDb } from "../memory/index-db"
 import { configureSqlite } from "../memory/sqlite"
@@ -87,6 +88,24 @@ export async function runDoctor(environment: DoctorEnvironment): Promise<number>
     "Keychain",
     "Unlock this Mac and restart Side.app if the helper handshake is unavailable",
   )
+  const diagnosticsResult = DaemonDiagnosticsSchema.safeParse(status?.["diagnostics"])
+  if (!diagnosticsResult.success) {
+    report("SKIP", "daemon diagnostics", "No diagnostic metadata is available")
+  } else {
+    const diagnostics = diagnosticsResult.data
+    const lastCapture =
+      diagnostics.last_successful_capture_at === null
+        ? "never"
+        : new Date(diagnostics.last_successful_capture_at).toISOString()
+    const lastError = diagnostics.last_error
+    report(
+      lastError === null ? "PASS" : "WARN",
+      "daemon diagnostics",
+      lastError === null
+        ? `No recorded error; last successful capture ${lastCapture}`
+        : `${lastError.name}${lastError.code === null ? "" : `/${lastError.code}`} at ${lastError.stage} ${new Date(lastError.timestamp).toISOString()}; consecutive ${lastError.consecutive_count}; last successful capture ${lastCapture}`,
+    )
+  }
   const requiredPermissions =
     permissions?.["accessibility"] === true &&
     permissions?.["input_monitoring"] === true &&

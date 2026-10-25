@@ -13,11 +13,15 @@ export type CapturePolicy = {
 
 export const HARD_BLOCKED_BUNDLE_IDS: readonly string[] = hardBlockedBundleIds
 
+function canonicalHostname(hostname: string): string {
+  return hostname.toLowerCase().replace(/\.$/u, "")
+}
+
 export function isDeniedHost(hostname: string, rules: readonly DenyRule[]): boolean {
-  const host = hostname.toLowerCase()
+  const host = canonicalHostname(hostname)
   return rules.some((rule) => {
     if (rule.scope !== "url" || rule.behavior !== "do_not_observe") return false
-    const denied = rule.urlDomain.toLowerCase()
+    const denied = canonicalHostname(rule.urlDomain)
     return host === denied || host.endsWith(`.${denied}`)
   })
 }
