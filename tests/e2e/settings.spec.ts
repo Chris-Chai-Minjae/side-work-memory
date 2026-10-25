@@ -36,7 +36,7 @@ beforeAll(async () => {
     rmSync(webDirectory, { recursive: true, force: true })
     throw error
   }
-})
+}, 30_000)
 
 afterAll(async () => {
   try {

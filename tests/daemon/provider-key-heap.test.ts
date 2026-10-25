@@ -12,18 +12,22 @@ import { SettingsSchema } from "../../src/contracts/settings"
 
 const InspectorReplySchema = z.object({
   id: z.number(),
-  result: z.object({ wasThrown: z.boolean() }),
+  result: z.object({
+    wasThrown: z.boolean(),
+    result: z.object({ value: z.unknown().optional() }).optional(),
+    exceptionDetails: z.unknown().optional(),
+  }),
 })
 
-async function waitForSocket(path: string): Promise<void> {
+async function waitForPath(path: string): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt++) {
     if (existsSync(path)) return
     await Bun.sleep(25)
   }
-  throw new Error("Synthetic daemon UDS did not start")
+  throw new Error(`Synthetic daemon path did not appear: ${path}`)
 }
 
-async function evaluate(inspector: WebSocket, expression: string): Promise<void> {
+async function evaluate(inspector: WebSocket, expression: string): Promise<unknown> {
   const reply = await new Promise<unknown>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("Inspector evaluation timed out")), 10_000)
     inspector.addEventListener(
@@ -42,9 +46,11 @@ async function evaluate(inspector: WebSocket, expression: string): Promise<void>
       }),
     )
   })
-  if (InspectorReplySchema.parse(reply).result.wasThrown) {
+  const result = InspectorReplySchema.parse(reply).result
+  if (result.wasThrown || result.exceptionDetails) {
     throw new Error("Daemon Inspector evaluation failed")
   }
+  return result.result?.value
 }
 
 test("Given a synthetic provider key sent over daemon UDS, when GC and heap snapshot run, then daemon outputs and live heap contain no key", async () => {
@@ -106,7 +112,7 @@ test("Given a synthetic provider key sent over daemon UDS, when GC and heap snap
         appVersion: "synthetic-canary",
       })}\n`,
     )
-    await waitForSocket(socketPath)
+    await waitForPath(socketPath)
     const inspectorUrl = stderr.match(/ws:\/\/127\.0\.0\.1:\d+\/[A-Za-z0-9]+/u)?.[0]
     if (!inspectorUrl) throw new Error("Synthetic daemon Inspector did not start")
     inspector = new WebSocket(inspectorUrl)
@@ -150,6 +156,7 @@ test("Given a synthetic provider key sent over daemon UDS, when GC and heap snap
       return await Bun.write(${JSON.stringify(snapshotPath)}, Bun.generateHeapSnapshot("v8", "arraybuffer"));
     })()`,
     )
+    await waitForPath(snapshotPath)
     const snapshot = readFileSync(snapshotPath)
     // Then: the positive marker proves that this is the daemon's live JS heap.
     expect(snapshot.includes(marker)).toBe(true)
