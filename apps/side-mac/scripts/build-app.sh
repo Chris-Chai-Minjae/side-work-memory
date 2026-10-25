@@ -15,7 +15,10 @@ mkdir -p "$app_dir/Contents/MacOS" "$resources/lib" "$resources/web" "$resources
 cp "$bin_dir/Side" "$app_dir/Contents/MacOS/Side"
 resource_bundle=
 for candidate in "$bin_dir"/*.bundle; do
-  [ -s "$candidate/Contents/Resources/hard-blocked-bundle-ids.json" ] || continue
+  if [ ! -s "$candidate/Contents/Resources/hard-blocked-bundle-ids.json" ] &&
+     [ ! -s "$candidate/hard-blocked-bundle-ids.json" ]; then
+    continue
+  fi
   if [ -n "$resource_bundle" ]; then
     printf '%s\n' 'Multiple hard-blocked bundle ID resources' >&2
     exit 1
@@ -23,14 +26,7 @@ for candidate in "$bin_dir"/*.bundle; do
   resource_bundle=$candidate
 done
 if [ -z "$resource_bundle" ]; then
-  printf 'Missing hard-blocked bundle ID resource in %s\n' "$bin_dir" >&2
-  ls -la "$bin_dir" >&2
-  for candidate in "$bin_dir"/*.bundle; do
-    [ -d "$candidate" ] || continue
-    printf 'Resource bundle: %s\n' "$candidate" >&2
-    ls -la "$candidate" >&2
-    if [ -d "$candidate/Contents" ]; then ls -la "$candidate/Contents" >&2; fi
-  done
+  printf '%s\n' 'Missing hard-blocked bundle ID resource' >&2
   exit 1
 fi
 cp -R "$resource_bundle" "$resources/"
