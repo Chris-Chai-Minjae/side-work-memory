@@ -331,7 +331,7 @@ final class DaemonSupervisor {
         let version = appVersion
         let pendingRotation = rotationTask
         Task.detached(priority: .userInitiated) { [weak self] in
-            await pendingRotation?.value
+            _ = await pendingRotation?.value
             let hello = try? CaptureProtocol.encodeHello(key: store.masterKey(), appVersion: version)
             await self?.finishLaunch(hello, generation: generation)
         }
@@ -350,11 +350,11 @@ final class DaemonSupervisor {
         child.standardInput = stdin
         child.standardOutput = stdout
         child.terminationHandler = { [weak self] terminated in
-            Task { @MainActor in self?.didExit(terminated) }
+            Task { @MainActor [weak self] in self?.didExit(terminated) }
         }
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let bytes = handle.availableData
-            Task { @MainActor in self?.receive(bytes, from: child) }
+            Task { @MainActor [weak self] in self?.receive(bytes, from: child) }
         }
         do {
             try child.run()

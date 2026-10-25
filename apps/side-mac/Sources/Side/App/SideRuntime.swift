@@ -144,7 +144,7 @@ final class SideRuntime: ObservableObject {
         unlockObserver = DistributedNotificationCenter.default().addObserver(
             forName: .init("com.apple.screenIsUnlocked"), object: nil, queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.supervisor.retryKeychain() }
+            Task { @MainActor [weak self] in self?.supervisor.retryKeychain() }
         }
         supervisor.start()
         started = true

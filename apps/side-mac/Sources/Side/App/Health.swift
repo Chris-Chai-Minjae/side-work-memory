@@ -36,7 +36,7 @@ final class HelperHealthMonitor {
         guard timer == nil else { return }
         try? refresh()
         let timer = Timer(timeInterval: Self.heartbeatInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in try? self?.refresh() }
+            Task { @MainActor [weak self] in try? self?.refresh() }
         }
         self.timer = timer
         RunLoop.main.add(timer, forMode: .common)

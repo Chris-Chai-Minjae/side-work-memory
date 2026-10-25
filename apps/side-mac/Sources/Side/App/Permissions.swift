@@ -96,7 +96,7 @@ final class PermissionCoordinator {
         inputTap: InputTap,
         probe: PermissionProbing = SystemPermissionProbe(),
         defaults: UserDefaults = .standard,
-        restartHelper: @escaping @MainActor () -> Void = PermissionCoordinator.restartSideApp
+        restartHelper: @escaping @MainActor () -> Void = { PermissionCoordinator.restartSideApp() }
     ) {
         self.init(
             probe: probe, defaults: defaults,
